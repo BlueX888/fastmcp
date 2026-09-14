@@ -118,7 +118,7 @@ _NESTED_FIELD_LIMIT = 16
 
 
 def _resolve_ref(schema: Any, defs: dict[str, Any]) -> Any:
-    """Follow one local ``$ref`` (``#/$defs/Name``) into ``defs``; otherwise return as-is."""
+    """Follow one local `$ref` (`#/$defs/Name`) into `defs`; otherwise return as-is."""
     if isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
         ref = schema["$ref"]
         prefix = "#/$defs/"
@@ -130,39 +130,40 @@ def _resolve_ref(schema: Any, defs: dict[str, Any]) -> Any:
 def _object_fields(schema: Any, defs: dict[str, Any]) -> list[str] | None:
     """Field names of the object a schema describes, one level deep, or None.
 
-    Looks through a local ``$ref``, an array's ``items``, and the non-null
-    branch of a nullable union, so ``list[Model]`` and ``Model | None`` both
-    yield ``Model``'s fields. Pydantic emits every model as a ``$ref`` into
-    ``$defs``, so without this step a typed return renders as ``object[]``
-    and the caller has to fetch once just to learn the field names.
+    Looks through a local `$ref`, an array's `items`, every object branch
+    of an `anyOf`/`oneOf` union, and every part of an `allOf`
+    composition, so `list[Model]`, `Model | None`, `A | B` and an
+    OpenAPI `allOf: [{$ref}, {properties}]` all yield the fields a caller
+    may see. Pydantic emits every model as a `$ref` into `$defs`, so
+    without this step a typed return renders as `object[]` and the caller
+    has to fetch once just to learn the field names.
     """
     schema = _resolve_ref(schema, defs)
     if not isinstance(schema, dict):
         return None
     if schema.get("type") == "array":
         return _object_fields(schema.get("items"), defs)
-    for key in ("anyOf", "oneOf"):
+    fields: list[str] = []
+    for key in ("anyOf", "oneOf", "allOf"):
         branches = schema.get(key)
         if isinstance(branches, list):
             for branch in branches:
-                fields = _object_fields(branch, defs)
-                if fields:
-                    return fields
-            return None
+                fields.extend(_object_fields(branch, defs) or [])
     props = schema.get("properties")
-    if isinstance(props, dict) and props:
-        return list(props)
-    return None
+    if isinstance(props, dict):
+        fields.extend(props)
+    unique = list(dict.fromkeys(fields))
+    return unique or None
 
 
 def _nested_fields(field: Any, defs: dict[str, Any]) -> str:
     """Suffix listing an object-valued field's own field names, or empty.
 
-    Names only: the level below is what turns ``items (object[])`` into
+    Names only: the level below is what turns `items (object[])` into
     something a caller can index, and names cost a fraction of what types or
     descriptions would. On a 51-tool SDK catalog where 44 tools return typed
     pages, this adds ~35% to a detailed render of the whole catalog; a typical
-    ``get_schema`` call covers two or three tools. Long objects are truncated
+    `get_schema` call covers two or three tools. Long objects are truncated
     with a count.
     """
     fields = _object_fields(field, defs)

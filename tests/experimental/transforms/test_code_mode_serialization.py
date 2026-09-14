@@ -124,6 +124,30 @@ def test_schema_section_lists_nested_field_names_through_defs() -> None:
     assert "- `inline` (object): `a`, `b`" in lines
 
 
+def test_schema_section_unions_fields_across_object_branches() -> None:
+    """A | B lists the fields of both models; allOf merges inherited and inline fields."""
+    schema = {
+        "type": "object",
+        "$defs": {
+            "A": {"type": "object", "properties": {"nested": {}, "shared": {}}},
+            "B": {"type": "object", "properties": {"value": {}, "shared": {}}},
+            "Base": {"type": "object", "properties": {"id": {}}},
+        },
+        "properties": {
+            "data": {"anyOf": [{"$ref": "#/$defs/A"}, {"$ref": "#/$defs/B"}]},
+            "composed": {
+                "allOf": [
+                    {"$ref": "#/$defs/Base"},
+                    {"type": "object", "properties": {"extra": {}}},
+                ]
+            },
+        },
+    }
+    lines = _schema_section(schema, "Returns")
+    assert "- `data` (object): `nested`, `shared`, `value`" in lines
+    assert "- `composed` (object): `id`, `extra`" in lines
+
+
 def test_schema_section_truncates_long_nested_objects() -> None:
     fields = {f"f{i}": {} for i in range(20)}
     schema = {
