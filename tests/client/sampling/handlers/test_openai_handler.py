@@ -13,6 +13,7 @@ from mcp_types import (
     SamplingMessage,
     TextContent,
     TextResourceContents,
+    ToolResultContent,
     ToolUseContent,
 )
 from openai import AsyncOpenAI
@@ -23,7 +24,9 @@ from openai.types.chat import (
     ChatCompletionContentPartInputAudioParam,
     ChatCompletionContentPartTextParam,
     ChatCompletionMessage,
+    ChatCompletionMessageToolCallParam,
     ChatCompletionSystemMessageParam,
+    ChatCompletionToolMessageParam,
     ChatCompletionUserMessageParam,
 )
 from openai.types.chat.chat_completion import Choice
@@ -219,6 +222,72 @@ def test_convert_list_image_in_assistant_message_raises():
                 )
             ],
         )
+
+
+def test_convert_list_tool_result_with_text_forwards_tool_message():
+    """Tool results mixed with text in a user message must not be dropped.
+
+    OpenAI requires a role="tool" message responding to each assistant
+    tool_call before the next user turn; dropping it makes the request
+    invalid and hides the tool output from the model.
+    """
+    msgs = OpenAISamplingHandler._convert_to_openai_messages(
+        system_prompt=None,
+        messages=[
+            SamplingMessage(
+                role="assistant",
+                content=[
+                    ToolUseContent(
+                        type="tool_use",
+                        id="call_1",
+                        name="get_weather",
+                        input={"city": "Paris"},
+                    )
+                ],
+            ),
+            SamplingMessage(
+                role="user",
+                content=[
+                    ToolResultContent(
+                        type="tool_result",
+                        tool_use_id="call_1",
+                        content=[TextContent(type="text", text="18C sunny")],
+                    ),
+                    TextContent(type="text", text="Now write the forecast."),
+                ],
+            ),
+        ],
+    )
+
+    assert msgs == [
+        ChatCompletionAssistantMessageParam(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                ChatCompletionMessageToolCallParam(
+                    id="call_1",
+                    type="function",
+                    function={
+                        "name": "get_weather",
+                        "arguments": '{"city": "Paris"}',
+                    },
+                )
+            ],
+        ),
+        ChatCompletionToolMessageParam(
+            role="tool",
+            tool_call_id="call_1",
+            content="18C sunny",
+        ),
+        ChatCompletionUserMessageParam(
+            role="user",
+            content=[
+                ChatCompletionContentPartTextParam(
+                    type="text", text="Now write the forecast."
+                )
+            ],
+        ),
+    ]
 
 
 def test_convert_list_tool_calls_with_image_raises():
