@@ -351,6 +351,44 @@ class TestToolFromFunction:
             "greet": "Greet a person.",
         }
 
+    @pytest.mark.parametrize("docstring", ["Double the input.", "", None])
+    async def test_partial_explicit_metadata_is_preserved(
+        self, docstring: str | None
+    ) -> None:
+        def multiply(x: int, y: int) -> int:
+            """Multiply two numbers."""
+            return x * y
+
+        double = functools.partial(multiply, y=2)
+        setattr(double, "__name__", "double")
+        setattr(double, "__doc__", docstring)
+        tool = Tool.from_function(double)
+
+        assert tool.name == "double"
+        assert tool.description == (docstring or None)
+        assert (await tool.run({"x": 3})).structured_content == {"result": 6}
+        assert (await tool.run({"x": 3, "y": 5})).structured_content == {"result": 15}
+
+    def test_partial_explicit_parameter_docs_are_preserved(self) -> None:
+        def multiply(x: int, y: int) -> int:
+            """Multiply two numbers.
+
+            Args:
+                x: Original input.
+            """
+            return x * y
+
+        double = functools.partial(multiply, y=2)
+        double.__doc__ = """Double the input.
+
+        Args:
+            x: Custom input.
+        """
+        tool = Tool.from_function(double, name="explicit_name", description="")
+        assert tool.name == "explicit_name"
+        assert tool.description == ""
+        assert tool.parameters["properties"]["x"]["description"] == "Custom input."
+
     def test_private_arguments(self):
         def add(_a: int, _b: int) -> int:
             """Add two numbers."""
