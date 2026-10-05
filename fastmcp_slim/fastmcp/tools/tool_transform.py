@@ -524,13 +524,6 @@ class TransformedTool(Tool):
         else:
             final_output_schema = cast(dict | None, output_schema)
 
-        if final_output_schema is not None and isinstance(final_output_schema, dict):
-            if not _is_object_schema(final_output_schema):
-                raise ValueError(
-                    f"Output schemas must represent object types due to MCP spec limitations. "
-                    f"Received: {final_output_schema!r}"
-                )
-
         if transform_fn is None:
             # User wants pure transformation - use forwarding_fn as the main function
             final_fn = forwarding_fn

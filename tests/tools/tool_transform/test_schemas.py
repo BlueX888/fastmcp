@@ -99,10 +99,8 @@ class TestTransformToolOutputSchema:
 
     async def test_transform_explicit_schema_runtime(self, base_string_tool):
         """Test runtime behavior with explicit output schema."""
-        new_tool = Tool.from_tool(base_string_tool)
-        # from_tool rejects non-object schemas, so set one directly to cover
-        # the runtime path where they disable structured content
-        new_tool.output_schema = {"type": "string", "minLength": 1}
+        custom_schema = {"type": "string", "minLength": 1}
+        new_tool = Tool.from_tool(base_string_tool, output_schema=custom_schema)
 
         result = await new_tool.run({"x": 10})
         # Non-object explicit schemas disable structured content
@@ -123,8 +121,9 @@ class TestTransformToolOutputSchema:
                 meta={"reason": "boom"},
             )
 
-        new_tool = Tool.from_tool(base_string_tool, transform_fn=custom_fn)
-        new_tool.output_schema = {"type": "string"}
+        new_tool = Tool.from_tool(
+            base_string_tool, transform_fn=custom_fn, output_schema={"type": "string"}
+        )
 
         result = await new_tool.run({"x": 1})
 
@@ -194,22 +193,6 @@ class TestTransformToolOutputSchema:
         assert isinstance(result.content[0], TextContent)
         assert result.content[0].text == "Result: 5"
 
-    def test_transform_rejects_non_object_output_schema(self, base_string_tool):
-        """Test that providing a non-object output schema raises a ValueError,
-        matching Tool.from_function."""
-
-        non_object_schemas = [
-            {"type": "string"},
-            {"type": "integer", "minimum": 0},
-            {"type": "array", "items": {"type": "string"}},
-        ]
-
-        for schema in non_object_schemas:
-            with pytest.raises(
-                ValueError, match="Output schemas must represent object types"
-            ):
-                Tool.from_tool(base_string_tool, output_schema=schema)
-
     def test_transform_with_custom_function_inferred_schema(self, base_dict_tool):
         """Test that custom function's output schema is inferred."""
 
@@ -262,10 +245,7 @@ class TestTransformToolOutputSchema:
         async def custom_fn(x: int) -> dict[str, str]:
             return {"custom": "value"}
 
-        explicit_schema = {
-            "type": "object",
-            "properties": {"custom": {"type": "number"}},
-        }
+        explicit_schema = {"type": "array", "items": {"type": "number"}}
         new_tool = Tool.from_tool(
             base_string_tool, transform_fn=custom_fn, output_schema=explicit_schema
         )
@@ -315,7 +295,7 @@ class TestTransformToolOutputSchema:
         )
 
         # Third transformation with explicit override
-        custom_schema = {"type": "object", "properties": {"value": {"type": "number"}}}
+        custom_schema = {"type": "number"}
         tool3 = Tool.from_tool(tool2, output_schema=custom_schema)
         assert tool3.output_schema == custom_schema
         assert tool3.output_schema != tool2.output_schema
