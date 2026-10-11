@@ -895,3 +895,58 @@ async def test_transform_fn_depends_is_resolved():
     async with Client(mcp) as client:
         result = await client.call_tool("transformed", {"x": 3})
     assert result.data == 63
+
+
+async def test_transform_fn_sync_generator_yields_values():
+    """A sync generator transform_fn's yielded values reach the client.
+
+    A generator body runs during iteration, not creation. FunctionTool
+    materializes generator bodies inside the invocation; TransformedTool's
+    direct dispatch must do the same or every yielded value is silently
+    lost (empty content, empty structured output).
+    """
+    mcp = FastMCP()
+
+    @mcp.tool
+    def base() -> list[str]:
+        return []
+
+    def gen_fn():
+        yield "a1"
+        yield "b1"
+
+    parent = await mcp.get_tool("base")
+    assert parent is not None
+    mcp.add_tool(Tool.from_tool(parent, name="gen_sync", transform_fn=gen_fn))
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("gen_sync", {})
+    assert result.data == ["a1", "b1"]
+    assert result.structured_content == {"result": ["a1", "b1"]}
+
+
+async def test_transform_fn_async_generator_yields_values():
+    """An async generator transform_fn's yielded values reach the client.
+
+    Async generator functions are not coroutine functions, so without
+    materialization the async generator object is serialized as its repr
+    and the structured-content check fails outright.
+    """
+    mcp = FastMCP()
+
+    @mcp.tool
+    def base() -> list[str]:
+        return []
+
+    async def gen_fn():
+        yield "a1"
+        yield "b1"
+
+    parent = await mcp.get_tool("base")
+    assert parent is not None
+    mcp.add_tool(Tool.from_tool(parent, name="gen_async", transform_fn=gen_fn))
+
+    async with Client(mcp) as client:
+        result = await client.call_tool("gen_async", {})
+    assert result.data == ["a1", "b1"]
+    assert result.structured_content == {"result": ["a1", "b1"]}

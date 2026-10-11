@@ -368,6 +368,13 @@ class TransformedTool(Tool):
                 result = await call_sync_fn_in_threadpool(fn, **arguments)
                 if inspect.isawaitable(result):
                     result = await result
+            # A generator body runs during iteration, not creation. Consume it
+            # inside this invocation so its yielded values become the result
+            # while _current_tool is still set for forward()/forward_raw().
+            if inspect.isasyncgen(result):
+                result = [item async for item in result]
+            if inspect.isgenerator(result):
+                result = list(result)
 
             # A multi-round-trip ask (SEP-2322) is not output data: it must
             # reach the wire handler intact, never reshaped by output_schema
