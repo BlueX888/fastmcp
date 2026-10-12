@@ -354,11 +354,15 @@ def json_schema_to_type(
 
 def _convert_normalized(schema: dict[str, Any], name: str | None) -> type:
     root_hash, root_size = _schema_digest(schema)
+    # `title` can carry any JSON value in a malformed schema; only a string
+    # (including the empty string) is a valid class-name source.
+    title = schema.get("title")
+    root_title = title if isinstance(title, str) else "Root"
     token = _conversion.set(
         _Conversion(
             root_hash=root_hash,
             root_size=root_size,
-            root_class_name=_sanitize_name(name or schema.get("title", "Root")),
+            root_class_name=_sanitize_name(name or root_title),
         )
     )
     try:
@@ -828,6 +832,16 @@ def _convert_schema(
         # Create a copy of the schema for each type, but keep all constraints
         types: list[type | Any] = []
         for t in schema_type:
+            if t == "object" and schema is schemas:
+                # The root narrowed to its object member: convert the schema
+                # itself, not a copy, so the generated class keeps the root
+                # identity (and name) that "$ref": "#" resolves to.
+                types.append(
+                    _object_schema_to_type(
+                        schema, schemas, resolving_refs=resolving_refs
+                    )
+                )
+                continue
             type_schema = dict(schema)
             type_schema["type"] = t
             types.append(_schema_to_type(type_schema, schemas, resolving_refs))
@@ -1087,7 +1101,8 @@ def _build_dataclass(
     if "$ref" in schema:
         ref = schema["$ref"]
         if ref == "#":
-            return ForwardRef(sanitized_name)
+            # "#" resolves to the conversion root, not to this class.
+            return ForwardRef(_conversion.get().root_class_name)
         if ref in resolving_refs:
             return Any
         schema = _resolve_ref(ref, schemas)
@@ -1115,8 +1130,9 @@ def _build_dataclass(
             field_type = _schema_to_type(prop_schema, schemas, resolving_refs)
             prop_schema = {}
         elif prop_schema.get("$ref") == "#":
-            # Check for self-reference in property
-            field_type = ForwardRef(sanitized_name)
+            # A direct "#" reference points at the conversion root, which
+            # may be a different class than the one being built here.
+            field_type = ForwardRef(_conversion.get().root_class_name)
         else:
             field_type = _schema_to_type(prop_schema, schemas, resolving_refs)
 

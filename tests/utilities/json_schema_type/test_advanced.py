@@ -1,7 +1,7 @@
 """Advanced JSON schema type conversion features."""
 
 from dataclasses import Field
-from typing import Any, Union
+from typing import Any, Union, cast
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -15,6 +15,12 @@ from fastmcp.utilities.json_schema_type import (
 
 def get_dataclass_field(type: type, field_name: str) -> Field:
     return type.__dataclass_fields__[field_name]  # ty: ignore[unresolved-attribute]
+
+
+def unwrap_optional(field: Field) -> Any:
+    """Return a field's bare type, unwrapping an Optional[T] annotation to T."""
+    field_type = cast(Any, field.type)
+    return field_type.__args__[0] if hasattr(field_type, "__args__") else field_type
 
 
 class TestDefaultValues:
@@ -286,8 +292,7 @@ class TestCircularReferences:
         )
         assert node_type.__name__ == "Node"
 
-        child = get_dataclass_field(node_type, "child").type
-        child_cls = child.__args__[0] if hasattr(child, "__args__") else child
+        child_cls = unwrap_optional(get_dataclass_field(node_type, "child"))
         assert child_cls.__name__ == "Node_2"
 
         validator: TypeAdapter[Any] = TypeAdapter(node_type)
@@ -344,18 +349,8 @@ class TestCircularReferences:
         first_type = json_schema_to_type(schema, name="First")
         second_type = json_schema_to_type(schema, name="Second")
 
-        first_nested = get_dataclass_field(first_type, "nested").type
-        first_nested = (
-            first_nested.__args__[0]
-            if hasattr(first_nested, "__args__")
-            else first_nested
-        )
-        second_nested = get_dataclass_field(second_type, "nested").type
-        second_nested = (
-            second_nested.__args__[0]
-            if hasattr(second_nested, "__args__")
-            else second_nested
-        )
+        first_nested = unwrap_optional(get_dataclass_field(first_type, "nested"))
+        second_nested = unwrap_optional(get_dataclass_field(second_type, "nested"))
         assert second_nested is not first_nested
 
         validator: TypeAdapter[Any] = TypeAdapter(second_type)
@@ -363,6 +358,89 @@ class TestCircularReferences:
             {"value": "v", "nested": {"root_ref": {"value": "x", "nested": None}}}
         )
         assert isinstance(node.nested.root_ref, second_type)
+
+    def test_untitled_nullable_object_root_self_reference(self):
+        # A type-list root narrows through a copy of the schema; the object
+        # member must still build the root class that "#" references.
+        root_type = json_schema_to_type(
+            {
+                "type": ["object", "null"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+                },
+            }
+        )
+        validator: TypeAdapter[Any] = TypeAdapter(root_type)
+        assert validator.validate_python(None) is None
+        node = validator.validate_python(
+            {"name": "a", "next": {"name": "b", "next": None}}
+        )
+        assert type(node).__name__ == "Root"
+        assert node.next.name == "b"
+
+    def test_titled_nullable_object_root_self_reference(self):
+        root_type = json_schema_to_type(
+            {
+                "type": ["object", "null"],
+                "title": "Node",
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+                },
+            }
+        )
+        validator: TypeAdapter[Any] = TypeAdapter(root_type)
+        node = validator.validate_python({"name": "a", "next": {"name": "b"}})
+        assert type(node).__name__ == "Node"
+        assert node.next.name == "b"
+
+    @pytest.mark.parametrize(
+        "schema,valid_value",
+        [
+            ({"type": "string", "title": None}, "x"),
+            ({"type": "string", "title": 5}, "x"),
+            ({"type": "object", "title": 5}, {}),
+        ],
+    )
+    def test_non_string_title_does_not_crash(self, schema, valid_value):
+        # `title` may hold any JSON value in a malformed schema; the
+        # conversion must handle the schemas it otherwise would.
+        root_type = json_schema_to_type(schema)
+        assert TypeAdapter(root_type).validate_python(valid_value) == valid_value
+
+    def test_nested_direct_root_reference_points_at_root(self):
+        # A direct `"root": {"$ref": "#"}` property on a nested class must
+        # reference the conversion root, not the nested class itself.
+        root_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Doc",
+                "required": ["value"],
+                "properties": {
+                    "value": {"type": "string"},
+                    "child": {
+                        "type": "object",
+                        "title": "Child",
+                        "required": ["tag"],
+                        "properties": {
+                            "tag": {"type": "string"},
+                            "root": {"$ref": "#"},
+                        },
+                    },
+                },
+            }
+        )
+        validator: TypeAdapter[Any] = TypeAdapter(root_type)
+        doc = validator.validate_python(
+            {"value": "v", "child": {"tag": "t", "root": {"value": "r"}}}
+        )
+        assert doc.child.root.value == "r"
+        with pytest.raises(ValidationError):
+            # A Child-shaped object is not a valid root value.
+            validator.validate_python(
+                {"value": "v", "child": {"tag": "t", "root": {"tag": "x"}}}
+            )
 
 
 class TestIdentifierNormalization:
