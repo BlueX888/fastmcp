@@ -181,6 +181,84 @@ class TestCircularReferences:
         assert result.person.friend.name == "Spot"
         assert result.person.friend.owner.name == "Bob"
 
+    def test_titled_root_self_reference_in_union(self):
+        node_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Node",
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+                },
+            }
+        )
+        assert node_type.__name__ == "Node"
+
+        validator: TypeAdapter[Any] = TypeAdapter(node_type)
+        node = validator.validate_python({"name": "a", "next": {"name": "b"}})
+        assert node.next.name == "b"
+        assert node.next.next is None
+
+    def test_titled_root_self_reference_in_items(self):
+        node_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Node",
+                "properties": {
+                    "name": {"type": "string"},
+                    "children": {"type": "array", "items": {"$ref": "#"}},
+                },
+            }
+        )
+        assert node_type.__name__ == "Node"
+
+        validator: TypeAdapter[Any] = TypeAdapter(node_type)
+        node = validator.validate_python({"name": "a", "children": [{"name": "b"}]})
+        assert node.children[0].name == "b"
+        assert node.children[0].children is None
+
+    def test_titled_root_self_reference_in_property_with_extras(self):
+        # additionalProperties: True builds a Pydantic model, whose fields
+        # all go through the generic reference handling.
+        node_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Node",
+                "additionalProperties": True,
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"$ref": "#"},
+                },
+            }
+        )
+        assert node_type.__name__ == "Node"
+
+        validator: TypeAdapter[Any] = TypeAdapter(node_type)
+        node = validator.validate_python({"name": "a", "next": {"name": "b"}})
+        assert node.next.name == "b"
+        assert node.next.next is None
+
+    def test_explicit_name_root_self_reference(self):
+        # An explicit name overrides the title for the generated class, so
+        # the self-reference must target the override, not the title.
+        node_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Node",
+                "properties": {
+                    "name": {"type": "string"},
+                    "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+                },
+            },
+            name="CustomNode",
+        )
+        assert node_type.__name__ == "CustomNode"
+
+        validator: TypeAdapter[Any] = TypeAdapter(node_type)
+        node = validator.validate_python({"name": "a", "next": {"name": "b"}})
+        assert node.next.name == "b"
+        assert node.next.next is None
+
 
 class TestIdentifierNormalization:
     """Test suite for handling non-standard property names."""

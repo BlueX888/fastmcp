@@ -234,6 +234,9 @@ class _Conversion:
 
     root_hash: str
     root_size: int
+    # Sanitized name of the class generated for the root schema; `"$ref": "#"`
+    # resolves to that class.
+    root_class_name: str
     resolved_refs: dict[str, Any] = field(default_factory=dict)
     building: set[tuple[str, str]] = field(default_factory=set)
     depth: int = 0
@@ -351,7 +354,13 @@ def json_schema_to_type(
 
 def _convert_normalized(schema: dict[str, Any], name: str | None) -> type:
     root_hash, root_size = _schema_digest(schema)
-    token = _conversion.set(_Conversion(root_hash=root_hash, root_size=root_size))
+    token = _conversion.set(
+        _Conversion(
+            root_hash=root_hash,
+            root_size=root_size,
+            root_class_name=_sanitize_name(name or schema.get("title", "Root")),
+        )
+    )
     try:
         # Always use the top-level schema for references
         if schema.get("type") == "object":
@@ -764,7 +773,7 @@ def _convert_schema(
         ref = schema["$ref"]
         # Handle self-reference
         if ref == "#":
-            return ForwardRef(_sanitize_name(schema.get("title", "Root")))
+            return ForwardRef(_conversion.get().root_class_name)
         if ref in resolving_refs:
             resolved = _resolve_ref(ref, schemas)
             if isinstance(resolved, Mapping) and (
