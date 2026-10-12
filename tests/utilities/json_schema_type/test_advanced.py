@@ -259,6 +259,111 @@ class TestCircularReferences:
         assert node.next.name == "b"
         assert node.next.next is None
 
+    def test_nested_class_named_like_root_does_not_shadow_root(self):
+        # A nested object titled like the root must not capture the root's
+        # `"$ref": "#"` references: pydantic binds a class's own name to that
+        # class before the conversion root, so the nested class is renamed.
+        node_type = json_schema_to_type(
+            {
+                "type": "object",
+                "title": "Node",
+                "required": ["name", "count"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "count": {"type": "integer"},
+                    "child": {
+                        "type": "object",
+                        "title": "Node",
+                        "required": ["name", "tag"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "tag": {"type": "string"},
+                            "next": {"anyOf": [{"$ref": "#"}, {"type": "null"}]},
+                        },
+                    },
+                },
+            }
+        )
+        assert node_type.__name__ == "Node"
+
+        child = get_dataclass_field(node_type, "child").type
+        child_cls = child.__args__[0] if hasattr(child, "__args__") else child
+        assert child_cls.__name__ == "Node_2"
+
+        validator: TypeAdapter[Any] = TypeAdapter(node_type)
+        # `next` is the ROOT schema, so a root-shaped instance validates...
+        node = validator.validate_python(
+            {
+                "name": "r",
+                "count": 1,
+                "child": {"name": "c", "tag": "t", "next": {"name": "n", "count": 1}},
+            }
+        )
+        assert node.child.next.count == 1
+        # ...and shapes that violate the root schema are rejected, whether
+        # or not they satisfy the nested class's fields.
+        with pytest.raises(ValidationError):
+            validator.validate_python(
+                {
+                    "name": "r",
+                    "count": 1,
+                    "child": {"name": "c", "tag": "t", "next": {"name": "n"}},
+                }
+            )
+        with pytest.raises(ValidationError):
+            validator.validate_python(
+                {
+                    "name": "r",
+                    "count": 1,
+                    "child": {
+                        "name": "c",
+                        "tag": "t",
+                        "next": {"name": "n", "tag": "t"},
+                    },
+                }
+            )
+
+    def test_name_override_does_not_reuse_stale_nested_class(self):
+        # A nested class bakes the root's name into its forward references,
+        # so conversions of the same schema under different `name=` overrides
+        # must not share nested-class cache entries.
+        schema = {
+            "type": "object",
+            "title": "Doc",
+            "properties": {
+                "value": {"type": "string"},
+                "nested": {
+                    "type": "object",
+                    "title": "Nested",
+                    "properties": {
+                        "root_ref": {"anyOf": [{"$ref": "#"}, {"type": "null"}]}
+                    },
+                },
+            },
+        }
+        first_type = json_schema_to_type(schema, name="First")
+        second_type = json_schema_to_type(schema, name="Second")
+
+        first_nested = get_dataclass_field(first_type, "nested").type
+        first_nested = (
+            first_nested.__args__[0]
+            if hasattr(first_nested, "__args__")
+            else first_nested
+        )
+        second_nested = get_dataclass_field(second_type, "nested").type
+        second_nested = (
+            second_nested.__args__[0]
+            if hasattr(second_nested, "__args__")
+            else second_nested
+        )
+        assert second_nested is not first_nested
+
+        validator: TypeAdapter[Any] = TypeAdapter(second_type)
+        node = validator.validate_python(
+            {"value": "v", "nested": {"root_ref": {"value": "x", "nested": None}}}
+        )
+        assert isinstance(node.nested.root_ref, second_type)
+
 
 class TestIdentifierNormalization:
     """Test suite for handling non-standard property names."""

@@ -945,6 +945,24 @@ def _create_field_with_default(
     return field(default=default_value)
 
 
+def _nested_class_name(
+    sanitized_name: str,
+    conversion: _Conversion,
+    schema: Mapping[str, Any],
+    schemas: Mapping[str, Any] | None,
+) -> str:
+    """Disambiguate a nested class named like the conversion root.
+
+    Pydantic resolves a class's annotations with the class's own name bound
+    to that class before the conversion root, so a nested class sharing the
+    root's name would capture every ``"$ref": "#"`` reference inside it.
+    Keep the root name pointing at the root class.
+    """
+    if sanitized_name == conversion.root_class_name and schema is not schemas:
+        return f"{sanitized_name}_2"
+    return sanitized_name
+
+
 def _create_pydantic_model(
     schema: Mapping[str, Any],
     name: str | None = None,
@@ -957,8 +975,15 @@ def _create_pydantic_model(
         raise ValueError("Name is required")
     sanitized_name = _sanitize_name(name)
     conversion = _conversion.get()
+    sanitized_name = _nested_class_name(sanitized_name, conversion, schema, schemas)
     schema_hash = _hash_schema(schema)
-    cache_key = (schema_hash + conversion.root_hash, sanitized_name)
+    # Nested classes bake the root class name into their forward references,
+    # so conversions that differ only in the root's name must not share
+    # cache entries.
+    cache_key = (
+        schema_hash + conversion.root_hash + conversion.root_class_name,
+        sanitized_name,
+    )
 
     # Return existing class if already built
     existing = _classes.get(cache_key)
@@ -1023,8 +1048,15 @@ def _create_dataclass(
         raise ValueError("Name is required")
     sanitized_name = _sanitize_name(name)
     conversion = _conversion.get()
+    sanitized_name = _nested_class_name(sanitized_name, conversion, schema, schemas)
     schema_hash = _hash_schema(schema)
-    cache_key = (schema_hash + conversion.root_hash, sanitized_name)
+    # Nested classes bake the root class name into their forward references,
+    # so conversions that differ only in the root's name must not share
+    # cache entries.
+    cache_key = (
+        schema_hash + conversion.root_hash + conversion.root_class_name,
+        sanitized_name,
+    )
 
     # Return existing class if already built
     existing = _classes.get(cache_key)
