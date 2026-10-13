@@ -135,6 +135,30 @@ def test_output_schema_rewrites_refs_inside_media_type_defs():
     validate_json_schema({"extra": {"inner": {"name": "n"}}}, result)
 
 
+def test_output_schema_keeps_media_type_defs_after_wrap_without_components():
+    schema = {
+        "type": "array",
+        "items": {"$ref": "#/$defs/Extra"},
+        "$defs": {"Extra": {"type": "string"}},
+    }
+    responses = {
+        "200": ResponseInfo(
+            description="ok",
+            content_schema={"application/json": schema},
+        )
+    }
+
+    result = extract_output_schema_from_responses(responses, {}, "3.1.0")
+
+    assert result is not None
+    assert result["x-fastmcp-wrap-result"] is True
+    assert result["properties"]["result"]["items"] == {"$ref": "#/$defs/Extra"}
+    assert result["$defs"]["Extra"] == {"type": "string"}
+
+    # The advertised schema must resolve every reference it carries.
+    validate_json_schema({"result": ["hello"]}, result)
+
+
 def test_parsed_route_flat_schema_keeps_media_type_defs():
     route = parse_openapi_to_http_routes(SPEC)[0]
 

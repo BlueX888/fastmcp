@@ -916,7 +916,10 @@ def extract_output_schema_from_responses(
         }
         output_schema = wrapped_schema
 
-    # Add schema definitions if available
+    # Reattach the definitions at the root even when there are no component
+    # schemas: the non-object wrap moves the schema's own $defs one level down,
+    # while its #/$defs/... references keep resolving against the root.
+    processed_defs: dict[str, Any] = {}
     if schema_definitions:
         processed_defs = definitions.copy()
 
@@ -930,6 +933,7 @@ def extract_output_schema_from_responses(
                     definitions=definitions,
                 )
 
+    if processed_defs or inline_defs:
         # Same-named inline $defs win: the schema's #/$defs/... references
         # are local to it, not to the component schemas.
         output_schema["$defs"] = {**processed_defs, **inline_defs}
