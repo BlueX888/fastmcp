@@ -202,6 +202,24 @@ class TestValidateURL:
             with pytest.raises(SSRFError, match="blocked IP"):
                 await validate_url("https://example.com/path")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            pytest.param("https://example.com:70000/path", id="out-of-range"),
+            pytest.param("https://example.com:abc/path", id="non-numeric"),
+        ],
+    )
+    async def test_malformed_port_rejected(self, url: str):
+        """URLs with a malformed port should be rejected with SSRFError.
+
+        ``parsed.port`` raises ValueError for out-of-range or non-numeric ports,
+        and callers like the CIMD fetcher only handle SSRFError — a ValueError
+        that escapes validate_url propagates out of the OAuth client lookup and
+        turns an unauthenticated /authorize or /token request into an HTTP 500.
+        """
+        with pytest.raises(SSRFError):
+            await validate_url(url)
+
 
 class TestSSRFSafeFetch:
     """Tests for ssrf_safe_fetch function."""

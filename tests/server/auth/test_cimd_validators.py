@@ -422,6 +422,17 @@ class TestCIMDClientManager:
         client = await manager.get_client(url)
         assert client is None
 
+    async def test_get_client_malformed_port_returns_none(self, manager):
+        """A client_id whose port is malformed is rejected, not raised.
+
+        get_client converts only CIMDFetchError/CIMDValidationError into a None
+        return, so validate_url must report the bad port as SSRFError; a bare
+        ValueError would escape the OAuth client lookup and surface as an
+        unhandled error on /authorize or /token.
+        """
+        client = await manager.get_client("https://example.com:70000/client.json")
+        assert client is None
+
     # Trust policy and consent bypass tests removed - functionality removed from CIMD
 
 
