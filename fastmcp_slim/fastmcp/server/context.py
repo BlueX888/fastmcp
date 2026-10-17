@@ -617,6 +617,11 @@ class Context:
 
         Messages sent to Clients are also logged to the `fastmcp.server.context.to_client` logger with a level of `DEBUG`.
 
+        In a background task the worker has no live session, so there is no
+        client to notify: the message is mirrored to the
+        `fastmcp.server.context.to_client` logger only — still gated by the
+        submitting session's requested level — instead of raising.
+
         Args:
             message: Log message
             level: Optional log level. One of "debug", "info", "notice", "warning", "error", "critical",
@@ -630,10 +635,27 @@ class Context:
         # Resolve the client-requested minimum level (set via logging/setLevel),
         # keyed by session id, falling back to the server's configured default.
         min_level = self.fastmcp.client_log_level
-        session = self.session
-        session_min = self.fastmcp._client_log_levels.get(
-            _log_level_session_key(session)
-        )
+        try:
+            session = self.session
+        except RuntimeError:
+            # No live session (e.g. a SEP-2663 worker, which polls input and
+            # status over no back-channel). Degrade the way the other
+            # session-scoped Context APIs do: gate on the submitting session's
+            # snapshotted session id and mirror the record server-side only.
+            session = None
+        if session is not None:
+            session_min = self.fastmcp._client_log_levels.get(
+                _log_level_session_key(session)
+            )
+        else:
+            from fastmcp.server.dependencies import _background_task_session_id
+
+            task_session_id = _background_task_session_id.get()
+            session_min = (
+                self.fastmcp._client_log_levels.get(task_session_id)
+                if task_session_id is not None
+                else None
+            )
         if session_min is not None:
             min_level = session_min
 
@@ -1328,7 +1350,7 @@ def _log_level_session_key(session: ServerSession) -> str:
 
 async def _log_to_server_and_client(
     data: LogData,
-    session: ServerSession,
+    session: ServerSession | None,
     level: LoggingLevel,
     logger_name: str | None = None,
     related_request_id: str | None = None,
@@ -1349,6 +1371,11 @@ async def _log_to_server_and_client(
         msg=f"{msg_prefix}: {data.msg}",
         extra=data.extra,
     )
+
+    if session is None:
+        # Session-less context (e.g. a background-task worker): the record is
+        # already mirrored server-side above, and there is no client to notify.
+        return
 
     # Deprecated upstream in SDK v2 but deliberately kept per compat directive;
     # removed with the multi-round-trip follow-up.
