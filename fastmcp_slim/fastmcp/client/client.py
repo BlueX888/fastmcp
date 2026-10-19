@@ -772,6 +772,14 @@ class Client(
         and other settings, but with no active session. Useful for creating
         independent sessions that don't share state with the original client.
 
+        A multi-server `MCPConfig` client gets its own backend connections. A
+        single-server `MCPConfig` client shares the eagerly-built backend
+        transport with the source so state such as OAuth tokens survives; when
+        that backend is keep-alive (e.g. stdio), its session/subprocess can
+        therefore be shared too. Client-level state (navigation, caches,
+        handlers, negotiation) is always independent, and closing one client
+        never closes a backend another client is actively using.
+
         Returns:
             A new Client instance with the same configuration but disconnected state.
 
@@ -787,12 +795,12 @@ class Client(
 
         # A config transport owns the backend transports of its active
         # connection (`connect_session` opens them, `close` tears them down).
-        # Those are connection-scoped, so the clone gets its own transport
-        # instance with fresh connection state while still sharing the config,
-        # the concrete subclass, and eagerly-built backends such as an OAuth
-        # provider and its token store. Without this, closing a clone that
-        # never connected would close the original's live backends — the
-        # symmetric case of a clone connecting (see #5618).
+        # The clone gets its own transport instance with per-instance
+        # ownership/connection state while still sharing the config, the
+        # concrete subclass, and (for single-server configs) the eagerly-built
+        # backend such as an OAuth provider and its token store. Without this,
+        # closing a clone that never connected would close the original's live
+        # backends — the symmetric case of a clone connecting (see #5618).
         if isinstance(self.transport, MCPConfigTransport):
             new_client.transport = cast(
                 ClientTransportT, self.transport.copy_for_new_client()

@@ -928,9 +928,9 @@ async def test_remote_config_oauth_survives_new_clone():
     assert clone.transport is not original.transport
     assert isinstance(clone.transport.transport, StreamableHttpTransport)
     assert clone.transport.transport.auth is auth
-    assert (
-        clone.transport.transport.auth.token_storage_adapter
-        is auth.token_storage_adapter
+    # `token_storage_adapter` is assigned by `OAuth._bind()`, after construction.
+    assert getattr(clone.transport.transport.auth, "token_storage_adapter") is getattr(
+        auth, "token_storage_adapter"
     )
 
 
@@ -1500,6 +1500,83 @@ async def test_connected_client_close_tears_down_only_its_own_backends():
         assert set(closed) == set(original_transports) | set(clone_transports)
 
 
+class ScriptedFastMCPTransport(FastMCPTransport):
+    """In-memory backend whose Nth connect can block forever or fail."""
+
+    def __init__(
+        self,
+        mcp: FastMCP,
+        *,
+        block_call: int | None = None,
+        fail_call: int | None = None,
+        started: asyncio.Event | None = None,
+        closed: list[FastMCPTransport] | None = None,
+    ):
+        super().__init__(mcp=mcp)
+        self.calls = 0
+        self.block_call = block_call
+        self.fail_call = fail_call
+        self.started = started
+        self.closed = closed
+
+    @asynccontextmanager
+    async def connect_session(
+        self,
+        *,
+        transport_options: Any = None,
+        **session_kwargs: Any,
+    ) -> AsyncGenerator[Any, None]:
+        self.calls += 1
+        if self.fail_call is not None and self.calls == self.fail_call:
+            raise RuntimeError("simulated connection failure")
+        if self.block_call is not None and self.calls == self.block_call:
+            assert self.started is not None
+            self.started.set()
+            await asyncio.Event().wait()
+        async with super().connect_session(
+            transport_options=transport_options, **session_kwargs
+        ) as session:
+            yield session
+
+    async def close(self):
+        if self.closed is not None:
+            self.closed.append(self)
+
+
+class ScriptedInMemoryStdioMCPServer(InMemoryStdioMCPServer):
+    """Config entry that hands out one pre-built scripted transport."""
+
+    scripted_transport: Any
+
+    def to_transport(self) -> FastMCPTransport:
+        return self.scripted_transport
+
+
+def _scripted_single_server_client(
+    *,
+    block_call: int | None = None,
+    fail_call: int | None = None,
+    started: asyncio.Event | None = None,
+    closed: list[FastMCPTransport] | None = None,
+) -> Client:
+    return Client(
+        MCPConfig(
+            mcpServers={
+                "only": ScriptedInMemoryStdioMCPServer(
+                    mcp=_make_add_server(),
+                    scripted_transport=ScriptedFastMCPTransport(
+                        mcp=_make_add_server(),
+                        block_call=block_call,
+                        fail_call=fail_call,
+                        started=started,
+                        closed=closed,
+                    ),
+                )
+            }
+        )
+    )
+
+
 async def test_unconnected_original_close_does_not_close_live_single_server_clone():
     """Single-server configs share their built backend; a close must not disturb it."""
     closed: list[FastMCPTransport] = []
@@ -1519,6 +1596,90 @@ async def test_unconnected_original_close_does_not_close_live_single_server_clon
         assert closed == []
 
         result = await clone.call_tool("add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+
+async def test_clone_close_after_disconnect_does_not_close_live_original():
+    """A clone that connected before must not close a still-live original."""
+    closed: list[FastMCPTransport] = []
+    original = _scripted_single_server_client(closed=closed)
+    clone = original.new()
+
+    async with original:
+        async with clone:
+            result = await clone.call_tool("add", {"a": 1, "b": 2})
+            assert result.data == 3
+
+        # The clone's own context has exited, but the original is still using
+        # the shared single-server backend.
+        await clone.close()
+        assert closed == []
+
+        result = await original.call_tool("add", {"a": 3, "b": 4})
+        assert result.data == 7
+
+
+async def test_stale_clone_close_does_not_close_original_connected_later():
+    """A disconnected clone's close must not reach an original that connects later."""
+    closed: list[FastMCPTransport] = []
+    original = _scripted_single_server_client(closed=closed)
+    clone = original.new()
+
+    async with clone:
+        result = await clone.call_tool("add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+    # The clone has connected and disconnected; only now does the original
+    # connect to the shared backend.
+    async with original:
+        await clone.close()
+        assert closed == []
+
+        result = await original.call_tool("add", {"a": 3, "b": 4})
+        assert result.data == 7
+
+
+async def test_cancelled_clone_connect_does_not_close_live_original():
+    """Cancelling a clone's connect must not release a live original's backend."""
+    started = asyncio.Event()
+    closed: list[FastMCPTransport] = []
+    original = _scripted_single_server_client(
+        block_call=2, started=started, closed=closed
+    )
+    clone = original.new()
+
+    async with original:
+        task = asyncio.create_task(clone.__aenter__())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert closed == []
+
+        result = await original.call_tool("add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+
+async def test_failed_clone_connect_does_not_close_live_original():
+    """A failed connect leaves nothing for close() to release."""
+    closed: list[FastMCPTransport] = []
+    original = _scripted_single_server_client(fail_call=2, closed=closed)
+    clone = original.new()
+
+    async with original:
+        with pytest.raises(RuntimeError, match="simulated connection failure"):
+            async with clone:
+                pass
+
+        # A failed connect leaves nothing for the transport to release. (Client
+        # close() would re-raise the failed session task first, so exercise the
+        # transport teardown the connection path calls.)
+        assert isinstance(clone.transport, MCPConfigTransport)
+        await clone.transport.close()
+        assert closed == []
+
+        result = await original.call_tool("add", {"a": 1, "b": 2})
         assert result.data == 3
 
 
