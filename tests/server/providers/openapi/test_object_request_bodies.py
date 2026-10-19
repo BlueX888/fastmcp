@@ -509,6 +509,53 @@ async def test_form_urlencoded_ref_to_nullable_array_of_objects_is_json_encoded(
     assert json.loads(payload) == [{"id": 1}]
 
 
+@pytest.mark.parametrize("composition", ["oneOf", "anyOf"])
+async def test_form_urlencoded_union_array_uses_matching_branch(
+    composition: str,
+) -> None:
+    """Runtime items choose the union branch instead of any alternative."""
+    rows_schema = {
+        composition: [
+            {"type": "array", "items": _ROW_OBJECT_SCHEMA},
+            {"type": "array", "items": {"type": "string"}},
+        ]
+    }
+    spec = _form_urlencoded_spec({"rows": rows_schema}, required=["rows"])
+
+    scalar_request = await _submit_and_capture(spec, {"rows": ["a", "b"]})
+    # The unused array-of-objects branch must not force JSON into one value.
+    assert _form_fields(scalar_request)["rows"] == ["a", "b"]
+
+    object_request = await _submit_and_capture(spec, {"rows": [{"id": 1}]})
+    payload = _form_fields(object_request)["rows"][0]
+    assert json.loads(payload) == [{"id": 1}]
+
+
+async def test_form_urlencoded_cyclic_component_graph_is_serialized() -> None:
+    """Mutually recursive composition refs terminate instead of recursing."""
+    components = {
+        "A": {
+            "allOf": [
+                {"$ref": "#/components/schemas/B"},
+                {
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                },
+            ]
+        },
+        "B": {"$ref": "#/components/schemas/A"},
+    }
+    spec = _form_urlencoded_spec(
+        {"filter": {"$ref": "#/components/schemas/A"}}, required=["filter"]
+    )
+    spec["components"] = {"schemas": components}
+
+    request = await _submit_and_capture(spec, {"filter": {"name": "alice"}})
+
+    payload = _form_fields(request)["filter"][0]
+    assert json.loads(payload) == {"name": "alice"}
+
+
 @pytest.mark.parametrize("use_ref", [False, True], ids=["inline", "ref"])
 async def test_form_urlencoded_additional_properties_objects_are_json_encoded(
     use_ref: bool,

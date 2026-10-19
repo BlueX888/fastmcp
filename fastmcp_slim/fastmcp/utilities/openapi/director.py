@@ -54,19 +54,28 @@ def _is_json_media_type(content_type: str | None) -> bool:
     return media_type == "application/json" or media_type.endswith("+json")
 
 
-def _resolve_schema_ref(schema: Any, definitions: dict[str, Any]) -> dict[str, Any]:
-    """Resolve a local `$ref` against the route's request schema definitions."""
-    seen: set[str] = set()
+def _resolve_schema_ref(
+    schema: Any,
+    definitions: dict[str, Any],
+    active_refs: frozenset[str] = frozenset(),
+) -> tuple[dict[str, Any], frozenset[str]]:
+    """Resolve a local `$ref`, tracking references active on this traversal path.
+
+    Returns the resolved schema (empty when the chain cycles or cannot be
+    resolved) plus the extended active-reference set. Callers recurse through
+    composition keywords with that set so mutually recursive component graphs
+    terminate instead of overflowing the stack.
+    """
     while isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
         ref = schema["$ref"]
-        if ref in seen:
-            return {}
-        seen.add(ref)
+        if ref in active_refs:
+            return {}, active_refs
+        active_refs = active_refs | {ref}
         target = definitions.get(ref.rsplit("/", 1)[-1])
         if not isinstance(target, dict):
-            return {}
+            return {}, active_refs
         schema = target
-    return schema if isinstance(schema, dict) else {}
+    return (schema if isinstance(schema, dict) else {}), active_refs
 
 
 def _schema_type_includes(schema: dict[str, Any], type_name: str) -> bool:
@@ -77,9 +86,13 @@ def _schema_type_includes(schema: dict[str, Any], type_name: str) -> bool:
     return isinstance(schema_type, list) and type_name in schema_type
 
 
-def _schema_is_object(schema: Any, definitions: dict[str, Any]) -> bool:
+def _schema_is_object(
+    schema: Any,
+    definitions: dict[str, Any],
+    active_refs: frozenset[str] = frozenset(),
+) -> bool:
     """Return whether a schema (or any composition branch) describes an object."""
-    schema = _resolve_schema_ref(schema, definitions)
+    schema, active_refs = _resolve_schema_ref(schema, definitions, active_refs)
     if not schema:
         return False
     if (
@@ -91,33 +104,50 @@ def _schema_is_object(schema: Any, definitions: dict[str, Any]) -> bool:
     for keyword in ("allOf", "anyOf", "oneOf"):
         members = schema.get(keyword)
         if isinstance(members, list) and any(
-            _schema_is_object(member, definitions) for member in members
+            _schema_is_object(member, definitions, active_refs) for member in members
         ):
             return True
     return False
 
 
-def _schema_is_array_of_objects(schema: Any, definitions: dict[str, Any]) -> bool:
-    """Return whether a schema (or any composition branch) is an object array."""
-    schema = _resolve_schema_ref(schema, definitions)
+def _schema_is_array_of_objects(
+    schema: Any,
+    definitions: dict[str, Any],
+    value: list[Any],
+    active_refs: frozenset[str] = frozenset(),
+) -> bool:
+    """Return whether a schema describes an object array matching `value`.
+
+    Composition alternatives are chosen against the runtime items: a `oneOf`
+    or `anyOf` that offers both `array<object>` and `array<string>` keeps a
+    string list on the string branch, so it is not JSON-encoded for an unused
+    object branch.
+    """
+    schema, active_refs = _resolve_schema_ref(schema, definitions, active_refs)
     if not schema:
         return False
     if _schema_type_includes(schema, "array"):
+        item_schemas: list[Any] = []
         items = schema.get("items")
         if isinstance(items, list):
-            if any(_schema_is_object(item, definitions) for item in items):
-                return True
-        elif _schema_is_object(items, definitions):
-            return True
+            item_schemas.extend(items)
+        elif items is not None:
+            item_schemas.append(items)
         prefix_items = schema.get("prefixItems")
-        if isinstance(prefix_items, list) and any(
-            _schema_is_object(item, definitions) for item in prefix_items
+        if isinstance(prefix_items, list):
+            item_schemas.extend(prefix_items)
+        if any(
+            _schema_is_object(item, definitions, active_refs) for item in item_schemas
         ):
-            return True
+            # Empty arrays carry no runtime type information; preserve the
+            # object-array behavior there.
+            return not value or any(isinstance(item, dict) for item in value)
+        return False
     for keyword in ("allOf", "anyOf", "oneOf"):
         members = schema.get(keyword)
         if isinstance(members, list) and any(
-            _schema_is_array_of_objects(member, definitions) for member in members
+            _schema_is_array_of_objects(member, definitions, value, active_refs)
+            for member in members
         ):
             return True
     return False
@@ -134,9 +164,11 @@ def _form_property_schemas(
     properties: dict[str, Any] = {}
     additional_properties: dict[str, Any] | None = None
 
-    def collect(schema: Any) -> None:
+    def collect(schema: Any, active_refs: frozenset[str] = frozenset()) -> None:
         nonlocal additional_properties
-        schema = _resolve_schema_ref(schema, definitions)
+        schema, active_refs = _resolve_schema_ref(schema, definitions, active_refs)
+        if not schema:
+            return
         if isinstance(schema.get("properties"), dict):
             properties.update(schema["properties"])
         if additional_properties is None:
@@ -146,7 +178,7 @@ def _form_property_schemas(
         members = schema.get("allOf")
         if isinstance(members, list):
             for member in members:
-                collect(member)
+                collect(member, active_refs)
 
     collect(body_schema)
     return properties, additional_properties
@@ -180,7 +212,7 @@ def _build_form_urlencoded_data(
                 )
                 or (
                     isinstance(value, list)
-                    and _schema_is_array_of_objects(prop_schema, definitions)
+                    and _schema_is_array_of_objects(prop_schema, definitions, value)
                 )
                 or (value is None and _schema_is_object(prop_schema, definitions))
             )
