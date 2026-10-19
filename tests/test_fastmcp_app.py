@@ -312,6 +312,21 @@ class TestResolveToolRef:
         assert isinstance(result, ResolvedTool)
         assert result.name == "my_tool"
 
+    def test_hash_shaped_name_is_still_given_an_identity(self):
+        """A user-chosen name that looks like ``<hash>_<name>`` is not
+        already addressed unless the digest is this app's hash for it."""
+        result = _make_resolver("contacts")("abcdef012345_save")
+        assert isinstance(result, ResolvedTool)
+        assert result.name == hashed_backend_name("contacts", "abcdef012345_save")
+
+    def test_genuinely_pre_addressed_name_is_unchanged(self):
+        """An identity this app would itself produce passes through, so a
+        resolver reference can be written in its addressed form."""
+        addressed = hashed_backend_name("contacts", "save")
+        result = _make_resolver("contacts")(addressed)
+        assert isinstance(result, ResolvedTool)
+        assert result.name == addressed
+
     def test_resolve_unresolvable_raises(self):
         with pytest.raises(ValueError):
             _make_resolver()(42)

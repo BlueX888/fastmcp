@@ -174,6 +174,59 @@ class TestMountedServerRoundTrip:
         assert result.content[0].text == "saved Carol"  # type: ignore[union-attr]  # ty:ignore[unresolved-attribute]
 
 
+class TestHashShapedToolNames:
+    """A user-chosen name can look exactly like a hashed backend name.
+
+    It is only pre-addressed when the digest is this app's own hash for the
+    name; otherwise it needs an identity of its own, or the payload ships a
+    name no server lists.
+    """
+
+    @staticmethod
+    def _app() -> FastMCPApp:
+        app = FastMCPApp("contacts")
+
+        @app.tool("abcdef012345_save")
+        def save(name: str) -> str:
+            return f"saved {name}"
+
+        @app.ui()
+        def form() -> Column:
+            return Column(
+                children=[
+                    Button(
+                        label="Save",
+                        on_click=CallTool(tool="abcdef012345_save"),
+                    )
+                ]
+            )
+
+        return app
+
+    @pytest.mark.parametrize("compose", ["provider-namespace", "mounted-namespace"])
+    async def test_emitted_ref_is_the_listed_name_and_callable(self, compose):
+        if compose == "provider-namespace":
+            server = FastMCP("Platform")
+            server.add_provider(self._app(), namespace="ns")
+        else:
+            inner = FastMCP("Inner")
+            inner.add_provider(self._app())
+            server = FastMCP("Outer")
+            server.mount(inner, namespace="ns")
+
+        listed = [t.name for t in await server.list_tools()]
+        assert "ns_abcdef012345_save" in listed
+
+        result = await server.call_tool("ns_form", {})
+        assert result.structured_content is not None
+        (ref,) = _tool_refs(result.structured_content)
+        assert ref == "ns_abcdef012345_save"
+        assert ref in listed
+
+        clicked = await server.call_tool(ref, {"name": "alice"})
+        assert clicked.content[0].text == "saved alice"  # type: ignore[union-attr]  # ty:ignore[unresolved-attribute]
+
+
 class TestProxiedServerRoundTrip:
     """A gateway proxying an app-bearing backend.
 

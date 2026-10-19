@@ -77,8 +77,14 @@ def _make_resolver(app_name: str | None = None) -> Any:
     def _prefix(local_name: str) -> str:
         if app_name:
             # Don't re-hash an already-addressed name (same guard the
-            # old ___ resolver had with "___" not in name).
-            if parse_hashed_backend_name(local_name) is not None:
+            # old ___ resolver had with "___" not in name). Only a name
+            # that actually carries this app's hash for its local part is
+            # pre-addressed; a user-chosen name that merely looks like
+            # ``<hash>_<name>`` still needs an identity.
+            parsed = parse_hashed_backend_name(local_name)
+            if parsed is not None and local_name == hashed_backend_name(
+                app_name, parsed[1]
+            ):
                 return local_name
             return hashed_backend_name(app_name, local_name)
         return local_name
