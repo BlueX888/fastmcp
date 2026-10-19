@@ -196,10 +196,9 @@ async def download_skill(
         # Percent-encode path segments to match the URIs the server lists
         # (SkillProvider quotes paths with safe="/"). Without this, a manifest
         # path containing "%" or "#" is decoded or truncated by URI parsing
-        # and the wrong file (or no file) is downloaded.
-        file_uri = (
-            f"skill://{quote(skill_name, safe='/')}/{quote(file_info.path, safe='/')}"
-        )
+        # and the wrong file (or no file) is downloaded. The skill name is
+        # left raw because the server emits and matches it without quoting.
+        file_uri = f"skill://{skill_name}/{quote(file_info.path, safe='/')}"
         result = await client.read_resource(file_uri)
 
         if not result:

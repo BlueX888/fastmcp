@@ -482,6 +482,31 @@ class TestDownloadSkillUriEncoding:
             "skill://team/pdf/100%2520%231.md",
         ]
 
+    @pytest.mark.parametrize(
+        "skill_name",
+        ["pdf!", "a&b", "plus+name", "100%20score"],
+    )
+    async def test_skill_names_with_sub_delims_still_download(
+        self, tmp_path: Path, skill_name: str
+    ) -> None:
+        # The server emits the skill-name segment raw and compares it before
+        # unquoting, so the client must not percent-encode the skill name.
+        skills_root = tmp_path / "named-skills"
+        skill = skills_root / skill_name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# Named\n", encoding="utf-8")
+        (skill / "plain.md").write_text("PLAIN CONTENT", encoding="utf-8")
+
+        mcp = FastMCP("Named Skills")
+        mcp.add_provider(SkillsDirectoryProvider(roots=skills_root))
+        target = tmp_path / "downloaded"
+        target.mkdir()
+
+        async with Client(mcp) as client:
+            result = await download_skill(client, skill_name, target)
+
+        assert (result / "plain.md").read_text() == "PLAIN CONTENT"
+
 
 class TestSyncSkills:
     async def test_downloads_all_skills(self, skills_server: FastMCP, tmp_path: Path):
