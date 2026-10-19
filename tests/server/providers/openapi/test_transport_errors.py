@@ -1,5 +1,7 @@
 """Transport error propagation from OpenAPI components."""
 
+from collections.abc import Callable
+
 import httpx2
 import pytest
 from mcp_types import TextContent
@@ -23,7 +25,9 @@ SPEC = {
 }
 
 
-def _upstream(handler) -> httpx2.AsyncClient:
+def _upstream(
+    handler: Callable[[httpx2.Request], httpx2.Response],
+) -> httpx2.AsyncClient:
     return httpx2.AsyncClient(
         base_url="https://api.example.test",
         transport=httpx2.MockTransport(handler),
