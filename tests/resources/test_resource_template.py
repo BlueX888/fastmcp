@@ -4,7 +4,7 @@ from urllib.parse import quote
 
 import pytest
 from mcp.types import TextResourceContents
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.resources import ResourceTemplate
@@ -784,6 +784,107 @@ class TestContextHandling:
             # read() returns the raw value
             result = await resource.read()
             assert result == "item: 42"
+
+
+class TestResourceTemplateFieldAliases:
+    """URI params must reach the Pydantic call schema under their alias."""
+
+    async def test_aliased_path_parameter(self):
+        """A Field(alias=...) path parameter is addressed by its Python name."""
+        mcp = FastMCP("test")
+
+        @mcp.resource("data://items/{id}")
+        def get_item(id: str = Field(alias="identifier")) -> str:
+            return f"item:{id}"
+
+        result = await mcp.read_resource("data://items/7")
+        assert "item:7" in str(result)
+
+    async def test_aliased_query_parameter(self):
+        """A Field(alias=...) query parameter is addressed by its Python name."""
+        mcp = FastMCP("test")
+
+        @mcp.resource("data://items{?q}")
+        def search(q: str = Field(default="all", alias="query")) -> str:
+            return f"query:{q}"
+
+        result = await mcp.read_resource("data://items?q=hi")
+        assert "query:hi" in str(result)
+
+        defaulted = await mcp.read_resource("data://items")
+        assert "query:all" in str(defaulted)
+
+    async def test_validation_alias_from_annotation(self):
+        """An Annotated Field(validation_alias=...) path parameter also works."""
+        mcp = FastMCP("test")
+
+        @mcp.resource("data://items/{id}")
+        def get_item(
+            id: Annotated[str, Field(validation_alias="identifier")],
+        ) -> str:
+            return f"item:{id}"
+
+        result = await mcp.read_resource("data://items/7")
+        assert "item:7" in str(result)
+
+    async def test_unaliased_template_unchanged(self):
+        """Ordinary path and query parameters keep their existing behavior."""
+        mcp = FastMCP("test")
+
+        @mcp.resource("data://items/{id}{?format}")
+        def get_item(id: int, format: str = "json") -> str:
+            return f"item:{id}:{format}"
+
+        with_query = await mcp.read_resource("data://items/7?format=xml")
+        assert "item:7:xml" in str(with_query)
+
+        defaulted = await mcp.read_resource("data://items/7")
+        assert "item:7:json" in str(defaulted)
+
+    async def test_injected_parameter_stays_excluded(self):
+        """Context injection still works and is not addressable from the URI."""
+
+        def get_item(ctx: Context, id: str = Field(alias="identifier")) -> str:
+            assert isinstance(ctx, Context)
+            return f"item:{id}"
+
+        template = ResourceTemplate.from_function(
+            fn=get_item,
+            uri_template="data://items/{id}",
+            name="test",
+        )
+
+        mcp = FastMCP("test")
+        context = Context(fastmcp=mcp)
+        async with context:
+            resource = await template.create_resource("data://items/7", {"id": "7"})
+            result = await resource.read()
+            assert result == "item:7"
+
+        with pytest.raises(ValueError, match="must be a subset"):
+            ResourceTemplate.from_function(
+                fn=get_item,
+                uri_template="data://items/{ctx}",
+                name="bad",
+            )
+
+    async def test_unknown_parameter_still_rejected(self):
+        """Alias translation leaves unknown arguments to validation."""
+
+        def get_item(id: str = Field(alias="identifier")) -> str:
+            return f"item:{id}"
+
+        template = ResourceTemplate.from_function(
+            fn=get_item,
+            uri_template="data://items/{id}",
+            name="test",
+        )
+
+        assert await template.read({"id": "7"}) == "item:7"
+        assert await template.read({"identifier": "7"}) == "item:7"
+
+        with pytest.raises(ValidationError, match="Unexpected keyword argument"):
+            await template.read({"id": "7", "extra": "x"})
 
 
 class TestMalformedURITemplates:

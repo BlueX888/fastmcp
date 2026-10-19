@@ -18,6 +18,7 @@ from pydantic import (
     field_validator,
     validate_call,
 )
+from pydantic.fields import FieldInfo
 from pydantic.json_schema import SkipJsonSchema
 
 from fastmcp.resources.base import (
@@ -33,8 +34,11 @@ from fastmcp.resources.security import (
 from fastmcp.utilities.authorization import AuthCheck
 from fastmcp.utilities.components import FastMCPComponent
 from fastmcp.utilities.json_schema import compress_schema
+from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.mime import resolve_ui_mime_type
-from fastmcp.utilities.types import get_cached_typeadapter
+from fastmcp.utilities.types import get_cached_typeadapter, get_function_type_hints
+
+logger = get_logger(__name__)
 
 
 def extract_query_params(uri_template: str) -> set[str]:
@@ -96,6 +100,64 @@ def extract_exploded_query_params(uri_template: str) -> set[str]:
         names = [p.strip() for p in match.group(1).split(",")]
         return {n.removesuffix("*") for n in names if n.endswith("*")}
     return set()
+
+
+def _python_names_by_call_name(fn: Callable[..., Any]) -> dict[str, str]:
+    """Map names in Pydantic's call schema to Python parameter names.
+
+    ``validate_call`` builds its schema from ``Field`` metadata, so a parameter
+    declared with ``Field(alias=...)`` or ``Field(validation_alias=...)`` is
+    accepted only under that alias. URI templates keep addressing parameters by
+    their Python names, so reads need this mapping to translate extracted
+    params to the names the call schema expects. Non-aliased parameters need no
+    entry.
+    """
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return {}
+    try:
+        hints = get_function_type_hints(fn)
+    except Exception:
+        hints = getattr(fn, "__annotations__", {})
+
+    mapping: dict[str, str] = {}
+    for param_name, param in sig.parameters.items():
+        if param.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        annotation = hints.get(param_name, param.annotation)
+        default = param.default
+        try:
+            if isinstance(default, FieldInfo):
+                # A Field(...) default is part of the call schema too. Merge
+                # it with Annotated metadata exactly as pydantic does, so the
+                # alias pydantic advertises is the one we map.
+                if annotation is inspect.Parameter.empty:
+                    field_info = default
+                else:
+                    field_info = FieldInfo.from_annotated_attribute(annotation, default)
+            elif annotation is not inspect.Parameter.empty:
+                field_info = FieldInfo.from_annotation(annotation)
+            else:
+                continue
+        except Exception as e:
+            logger.debug(
+                "Could not determine alias for resource template parameter %s: %s",
+                param_name,
+                e,
+            )
+            continue
+        # Pydantic names the call-schema property after the validation alias
+        # (which `alias` also populates), falling back to the Python name.
+        call_name = field_info.validation_alias
+        if not isinstance(call_name, str):
+            call_name = field_info.alias
+        if isinstance(call_name, str) and call_name != param_name:
+            mapping[call_name] = param_name
+    return mapping
 
 
 # RFC 3986 reserved characters, which stay as written in a template literal.
@@ -569,6 +631,11 @@ class FunctionResourceTemplate(ResourceTemplate):
 
     fn: SkipJsonSchema[Callable[..., Any]]
 
+    # Advertised call-schema name -> Python parameter name, and its inverse,
+    # for parameters whose Pydantic alias differs from the signature name.
+    _python_names_by_call_name: dict[str, str] = PrivateAttr(default_factory=dict)
+    _call_names_by_python_name: dict[str, str] = PrivateAttr(default_factory=dict)
+
     async def _read(self, uri: str, params: dict[str, Any]) -> ResourceResult:
         """Optimized server entry point that skips ephemeral resource creation.
 
@@ -603,8 +670,14 @@ class FunctionResourceTemplate(ResourceTemplate):
 
     async def read(self, arguments: dict[str, Any]) -> str | bytes | ResourceResult:
         """Read the resource content."""
+        # URI/query extraction uses Python parameter names, while validate_call
+        # accepts Field aliases. Normalize either spelling to the Python name
+        # for type coercion below, then translate back to the call-schema name.
+        kwargs = {
+            self._python_names_by_call_name.get(name, name): value
+            for name, value in arguments.items()
+        }
         # Type coercion for query parameters (which arrive as strings)
-        kwargs = arguments.copy()
         sig = inspect.signature(self.fn)
         for param_name, param_value in list(kwargs.items()):
             if param_name in sig.parameters and isinstance(param_value, str):
@@ -631,6 +704,15 @@ class FunctionResourceTemplate(ResourceTemplate):
                             )
                 except (ValueError, AttributeError):
                     raise
+
+        # `validate_call` advertises the alias rather than the Python name.
+        # Unknown names are left untouched so unexpected arguments still fail
+        # validation exactly as before.
+        if self._call_names_by_python_name:
+            kwargs = {
+                self._call_names_by_python_name.get(name, name): value
+                for name, value in kwargs.items()
+            }
 
         # self.fn is wrapped by without_injected_parameters which handles
         # dependency resolution internally, so we call it directly
@@ -819,6 +901,10 @@ class FunctionResourceTemplate(ResourceTemplate):
         parameters = type_adapter.json_schema()
         parameters = compress_schema(parameters, prune_titles=True)
 
+        # The call schema advertises aliases, so keep the link back to the
+        # Python parameter that the URI template addresses.
+        python_names_by_call_name = _python_names_by_call_name(wrapper_fn)
+
         # Use validate_call on wrapper for runtime type coercion
         fn = validate_call(wrapper_fn)
 
@@ -842,4 +928,9 @@ class FunctionResourceTemplate(ResourceTemplate):
             security=security,
         )
         template._list_query_params = frozenset(list_query_params)
+        template._python_names_by_call_name = python_names_by_call_name
+        template._call_names_by_python_name = {
+            python_name: call_name
+            for call_name, python_name in python_names_by_call_name.items()
+        }
         return template
