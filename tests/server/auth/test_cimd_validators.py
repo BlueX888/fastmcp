@@ -389,6 +389,21 @@ class TestCIMDClientManager:
         assert not disabled_manager.is_cimd_client_id("https://example.com/client.json")
         assert not disabled_manager.is_cimd_client_id("regular-client-id")
 
+    def test_positional_constructor_keeps_redirect_patterns_binding(self):
+        """The pre-existing positional form must keep binding as before.
+
+        `CIMDClientManager(True, "read", patterns)` historically bound
+        `patterns` to allowed_redirect_uri_patterns. `valid_scopes` is
+        keyword-only so adding it cannot silently steal that argument.
+        """
+        patterns = ["http://localhost:*", "https://app.example.com/*"]
+        manager = CIMDClientManager(True, "read", patterns)
+
+        assert manager.enabled is True
+        assert manager.default_scope == "read"
+        assert manager.allowed_redirect_uri_patterns == patterns
+        assert manager.valid_scopes is None
+
     async def test_get_client_success(self, manager, httpx_mock, mock_dns):
         """Test successful CIMD client creation."""
         url = "https://example.com/client.json"

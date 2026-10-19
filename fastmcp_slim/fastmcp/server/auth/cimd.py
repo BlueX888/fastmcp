@@ -717,17 +717,19 @@ class CIMDClientManager:
         self,
         enable_cimd: bool = True,
         default_scope: str = "",
-        valid_scopes: list[str] | None = None,
         allowed_redirect_uri_patterns: list[str] | None = None,
+        *,
+        valid_scopes: list[str] | None = None,
     ):
         """Initialize CIMD client manager.
 
         Args:
             enable_cimd: Whether CIMD support is enabled
             default_scope: Default scope for CIMD clients if not specified in document
+            allowed_redirect_uri_patterns: Allowed redirect URI patterns (proxy's config)
             valid_scopes: Scopes the server allows clients to request. When set,
                 document-declared scopes are intersected with this allowlist.
-            allowed_redirect_uri_patterns: Allowed redirect URI patterns (proxy's config)
+                Keyword-only so the existing positional signature is unchanged.
         """
         self.enabled = enable_cimd
         self.default_scope = default_scope
