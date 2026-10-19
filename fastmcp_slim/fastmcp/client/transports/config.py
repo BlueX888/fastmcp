@@ -84,6 +84,10 @@ class MCPConfigTransport(ClientTransport):
             config = MCPConfig.from_dict(config)
         self.config = config
         self.name_as_prefix = name_as_prefix
+        # Backend transports for the most recent connection opened by *this*
+        # transport instance. They are connection-scoped, so a `Client.new()`
+        # clone must own a separate MCPConfigTransport rather than sharing this
+        # list: `close()` on one client must not tear down another's backends.
         self._transports: list[ClientTransport] = []
         self._request_state_security: RequestStateSecurity | None = None
         self._resolved_legacy_only = False
