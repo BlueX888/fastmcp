@@ -246,6 +246,34 @@ def _form_fields(request: httpx2.Request) -> dict[str, list[str]]:
     return parse_qs(request.content.decode("utf-8"), keep_blank_values=True)
 
 
+def _form_body_schema_spec(
+    body_schema: dict[str, Any],
+    components: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a form-urlencoded spec around an arbitrary body schema."""
+    spec: dict[str, Any] = {
+        "openapi": "3.1.0",
+        "info": {"title": "Form API", "version": "1.0"},
+        "paths": {
+            "/submit": {
+                "post": {
+                    "operationId": "submit",
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/x-www-form-urlencoded": {"schema": body_schema}
+                        },
+                    },
+                    "responses": {"200": {"description": "OK"}},
+                }
+            }
+        },
+    }
+    if components is not None:
+        spec["components"] = {"schemas": components}
+    return spec
+
+
 @pytest.mark.parametrize("use_ref", [False, True], ids=["inline", "ref"])
 async def test_form_urlencoded_object_property_is_json_encoded(
     use_ref: bool,
@@ -402,3 +430,106 @@ async def test_json_object_body_serialization_is_unchanged() -> None:
         "filter": {"name": "alice", "metadata": None},
         "tags": ["a", "b"],
     }
+
+
+_ROW_OBJECT_SCHEMA = {
+    "type": "object",
+    "properties": {"id": {"type": "integer"}},
+}
+
+
+@pytest.mark.parametrize(
+    "rows_schema",
+    [
+        pytest.param(
+            {
+                "anyOf": [
+                    {"type": "array", "items": _ROW_OBJECT_SCHEMA},
+                    {"type": "null"},
+                ]
+            },
+            id="anyOf",
+        ),
+        pytest.param(
+            {
+                "oneOf": [
+                    {"type": "array", "items": _ROW_OBJECT_SCHEMA},
+                    {"type": "null"},
+                ]
+            },
+            id="oneOf",
+        ),
+        pytest.param(
+            {"type": ["array", "null"], "items": _ROW_OBJECT_SCHEMA},
+            id="type-list",
+        ),
+        pytest.param(
+            {"allOf": [{"type": "array", "items": _ROW_OBJECT_SCHEMA}]},
+            id="allOf",
+        ),
+    ],
+)
+async def test_form_urlencoded_nullable_array_of_objects_is_json_encoded(
+    rows_schema: dict[str, Any],
+) -> None:
+    """Nullable/composed array schemas still identify arrays of objects."""
+    spec = _form_urlencoded_spec({"rows": rows_schema}, required=["rows"])
+
+    request = await _submit_and_capture(spec, {"rows": [{"id": 1}]})
+
+    payload = _form_fields(request)["rows"][0]
+    assert "'id'" not in payload
+    assert json.loads(payload) == [{"id": 1}]
+
+
+async def test_form_urlencoded_ref_to_nullable_array_of_objects_is_json_encoded() -> (
+    None
+):
+    """A `$ref` resolving to a nullable array of objects is JSON-encoded."""
+    spec = _form_urlencoded_spec(
+        {"rows": {"$ref": "#/components/schemas/NullableRows"}},
+        required=["rows"],
+    )
+    spec["components"] = {
+        "schemas": {
+            "Row": _ROW_OBJECT_SCHEMA,
+            "NullableRows": {
+                "anyOf": [
+                    {"type": "array", "items": {"$ref": "#/components/schemas/Row"}},
+                    {"type": "null"},
+                ]
+            },
+        }
+    }
+
+    request = await _submit_and_capture(spec, {"rows": [{"id": 1}]})
+
+    payload = _form_fields(request)["rows"][0]
+    assert "'id'" not in payload
+    assert json.loads(payload) == [{"id": 1}]
+
+
+@pytest.mark.parametrize("use_ref", [False, True], ids=["inline", "ref"])
+async def test_form_urlencoded_additional_properties_objects_are_json_encoded(
+    use_ref: bool,
+) -> None:
+    """Object map values from additionalProperties are JSON-encoded."""
+    labels_schema = {
+        "type": "object",
+        "additionalProperties": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+        },
+    }
+    if use_ref:
+        spec = _form_body_schema_spec(
+            {"$ref": "#/components/schemas/Labels"}, {"Labels": labels_schema}
+        )
+    else:
+        spec = _form_body_schema_spec(labels_schema)
+
+    request = await _submit_and_capture(spec, {"body": {"team": {"name": "infra"}}})
+
+    payload = _form_fields(request)["team"][0]
+    assert "'name'" not in payload
+    assert json.loads(payload) == {"name": "infra"}

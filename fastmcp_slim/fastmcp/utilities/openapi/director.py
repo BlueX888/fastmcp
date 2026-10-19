@@ -69,13 +69,21 @@ def _resolve_schema_ref(schema: Any, definitions: dict[str, Any]) -> dict[str, A
     return schema if isinstance(schema, dict) else {}
 
 
+def _schema_type_includes(schema: dict[str, Any], type_name: str) -> bool:
+    """Return whether `type` declares the given type, including type lists."""
+    schema_type = schema.get("type")
+    if schema_type == type_name:
+        return True
+    return isinstance(schema_type, list) and type_name in schema_type
+
+
 def _schema_is_object(schema: Any, definitions: dict[str, Any]) -> bool:
     """Return whether a schema (or any composition branch) describes an object."""
     schema = _resolve_schema_ref(schema, definitions)
     if not schema:
         return False
     if (
-        schema.get("type") == "object"
+        _schema_type_includes(schema, "object")
         or "properties" in schema
         or "additionalProperties" in schema
     ):
@@ -90,38 +98,58 @@ def _schema_is_object(schema: Any, definitions: dict[str, Any]) -> bool:
 
 
 def _schema_is_array_of_objects(schema: Any, definitions: dict[str, Any]) -> bool:
-    """Return whether a schema describes an array whose items are objects."""
+    """Return whether a schema (or any composition branch) is an object array."""
     schema = _resolve_schema_ref(schema, definitions)
-    if not schema or schema.get("type") != "array":
+    if not schema:
         return False
-    items = schema.get("items")
-    if isinstance(items, list):
-        return any(_schema_is_object(item, definitions) for item in items)
-    if _schema_is_object(items, definitions):
-        return True
-    prefix_items = schema.get("prefixItems")
-    return isinstance(prefix_items, list) and any(
-        _schema_is_object(item, definitions) for item in prefix_items
-    )
+    if _schema_type_includes(schema, "array"):
+        items = schema.get("items")
+        if isinstance(items, list):
+            if any(_schema_is_object(item, definitions) for item in items):
+                return True
+        elif _schema_is_object(items, definitions):
+            return True
+        prefix_items = schema.get("prefixItems")
+        if isinstance(prefix_items, list) and any(
+            _schema_is_object(item, definitions) for item in prefix_items
+        ):
+            return True
+    for keyword in ("allOf", "anyOf", "oneOf"):
+        members = schema.get(keyword)
+        if isinstance(members, list) and any(
+            _schema_is_array_of_objects(member, definitions) for member in members
+        ):
+            return True
+    return False
 
 
 def _form_property_schemas(
     body_schema: dict[str, Any], definitions: dict[str, Any]
-) -> dict[str, Any]:
-    """Collect a form body's property schemas, merging `allOf` members."""
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Collect a form body's property schemas, merging `allOf` members.
+
+    Returns the declared properties plus the `additionalProperties` schema
+    (if any) that applies to names not declared in `properties`.
+    """
     properties: dict[str, Any] = {}
+    additional_properties: dict[str, Any] | None = None
 
     def collect(schema: Any) -> None:
+        nonlocal additional_properties
         schema = _resolve_schema_ref(schema, definitions)
         if isinstance(schema.get("properties"), dict):
             properties.update(schema["properties"])
+        if additional_properties is None:
+            extra = schema.get("additionalProperties")
+            if isinstance(extra, dict):
+                additional_properties = extra
         members = schema.get("allOf")
         if isinstance(members, list):
             for member in members:
                 collect(member)
 
     collect(body_schema)
-    return properties
+    return properties, additional_properties
 
 
 def _build_form_urlencoded_data(
@@ -137,14 +165,14 @@ def _build_form_urlencoded_data(
     An explicit encoding `contentType` overrides that default. Scalars and
     arrays of scalars keep httpx's form encoding (arrays repeat the key).
     """
-    properties = _form_property_schemas(body_schema, definitions)
+    properties, additional_properties = _form_property_schemas(body_schema, definitions)
     data: dict[str, Any] = {}
     for name, value in body.items():
         content_type = encoding.get(name, {}).get("contentType")
         if content_type is not None:
             json_encode = _is_json_media_type(content_type)
         else:
-            prop_schema = properties.get(name, {})
+            prop_schema = properties.get(name, additional_properties or {})
             json_encode = (
                 (
                     isinstance(value, dict)
