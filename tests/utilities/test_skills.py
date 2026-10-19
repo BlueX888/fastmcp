@@ -401,6 +401,88 @@ class TestDownloadSkill:
         assert (result / "data.bin").read_bytes() == data
 
 
+class TestDownloadSkillUriEncoding:
+    """Manifest paths must be percent-encoded when building resource URIs."""
+
+    @staticmethod
+    def _server(tmp_path: Path) -> FastMCP:
+        skills_root = tmp_path / "encoding-skills"
+        skill = skills_root / "encoding-skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# Encoding\n", encoding="utf-8")
+        # A literal percent triplet and the sibling its URI decodes to.
+        (skill / "100%20score.md").write_text("LITERAL PERCENT", encoding="utf-8")
+        (skill / "100 score.md").write_text("DECODED SPACE", encoding="utf-8")
+        # A fragment delimiter plus a sibling that would be read if truncated.
+        (skill / "notes#1.md").write_text("HASH FILE", encoding="utf-8")
+        (skill / "notes").write_text("SIBLING WITHOUT FRAGMENT", encoding="utf-8")
+        # A normal nested path that must keep working.
+        docs = skill / "docs"
+        docs.mkdir()
+        (docs / "guide.md").write_text("NESTED GUIDE", encoding="utf-8")
+
+        mcp = FastMCP("Encoding Skills")
+        mcp.add_provider(SkillsDirectoryProvider(roots=skills_root))
+        return mcp
+
+    async def test_percent_triplet_path_downloads_literal_file(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "downloaded"
+        target.mkdir()
+
+        async with Client(self._server(tmp_path)) as client:
+            result = await download_skill(client, "encoding-skill", target)
+
+        assert (result / "100%20score.md").read_text() == "LITERAL PERCENT"
+        assert (result / "100 score.md").read_text() == "DECODED SPACE"
+
+    async def test_hash_in_path_downloads_own_file(self, tmp_path: Path) -> None:
+        target = tmp_path / "downloaded"
+        target.mkdir()
+
+        async with Client(self._server(tmp_path)) as client:
+            result = await download_skill(client, "encoding-skill", target)
+
+        assert (result / "notes#1.md").read_text() == "HASH FILE"
+        assert (result / "notes").read_text() == "SIBLING WITHOUT FRAGMENT"
+
+    async def test_nested_path_downloads_normally(self, tmp_path: Path) -> None:
+        target = tmp_path / "downloaded"
+        target.mkdir()
+
+        async with Client(self._server(tmp_path)) as client:
+            result = await download_skill(client, "encoding-skill", target)
+
+        assert (result / "docs" / "guide.md").read_text() == "NESTED GUIDE"
+
+    async def test_requests_percent_encoded_uris(self, tmp_path: Path) -> None:
+        path = "100%20#1.md"
+        manifest = {
+            "skill": "team/pdf",
+            "files": [{"path": path, "size": 4, "hash": "sha256:data"}],
+        }
+        client = FakeResourceReader(
+            {
+                "skill://team/pdf/_manifest": [
+                    text_resource("skill://team/pdf/_manifest", json.dumps(manifest))
+                ],
+                "skill://team/pdf/100%2520%231.md": [
+                    text_resource("skill://team/pdf/100%2520%231.md", "DATA")
+                ],
+            }
+        )
+
+        result = await download_skill(cast(Client, client), "team/pdf", tmp_path)
+
+        assert (result / path).read_text() == "DATA"
+        # Multi-segment skill names keep their slashes; path segments are quoted.
+        assert client.requested_uris == [
+            "skill://team/pdf/_manifest",
+            "skill://team/pdf/100%2520%231.md",
+        ]
+
+
 class TestSyncSkills:
     async def test_downloads_all_skills(self, skills_server: FastMCP, tmp_path: Path):
         target = tmp_path / "synced"
