@@ -17,6 +17,7 @@ worker's generated UUID or cached state prefix cannot miss it.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable
 from types import SimpleNamespace
 from typing import cast
 from uuid import uuid4
@@ -25,18 +26,36 @@ import pytest
 from fastmcp_tasks.context import TaskContextSnapshot
 from mcp import ServerSession
 
+import fastmcp.server.dependencies as server_dependencies
 from fastmcp import FastMCP
 from fastmcp.server.context import Context, to_client_logger
-from fastmcp.server.dependencies import (
-    _background_task_log_level_session_key,
-    _background_task_session_id,
-)
+from fastmcp.server.dependencies import _background_task_session_id
 from fastmcp_tasks import TasksExtension
 from tests.tasks.task_helpers import (
     running_task_server,
     submit_task,
     wait_for_task,
 )
+
+
+def _log_level_key_var():
+    """The key-alignment ContextVar, or ``None`` on a pre-fix checkout.
+
+    Resolved dynamically so this module still collects on a checkout that
+    predates the symbol: the missing alignment must fail a test's assertion,
+    not the import, so the red receipt reflects behavior.
+    """
+    return getattr(server_dependencies, "_background_task_log_level_session_key", None)
+
+
+async def _log(coro: Awaitable[None]) -> None:
+    """Await a Context.log call, failing the test if the old bug re-raises."""
+    try:
+        await coro
+    except RuntimeError as exc:
+        raise AssertionError(
+            f"ctx logging raised RuntimeError in a background task: {exc}"
+        ) from exc
 
 
 def _capture_mirror() -> tuple[list[str], logging.Handler]:
@@ -94,17 +113,22 @@ class TestSessionlessWorkerContextLogging:
         session_id = "session-abc"
         # The id ctx.session_id would snapshot is not the setLevel key; the
         # snapshot separately carries the exact key setLevel wrote.
+        level_key_var = _log_level_key_var()
+        assert level_key_var is not None, (
+            "fastmcp.server.dependencies is missing the background-task "
+            "setLevel key ContextVar"
+        )
         session_token = _background_task_session_id.set("generated-uuid")
-        key_token = _background_task_log_level_session_key.set(session_id)
+        key_token = level_key_var.set(session_id)
         mcp._client_log_levels[session_id] = "error"
 
         mirrored, handler = _capture_mirror()
         try:
-            await ctx.info("info msg")  # below the gate: suppressed
-            await ctx.error("error msg")  # at the gate: mirrored server-side
+            await _log(ctx.info("info msg"))  # below the gate: suppressed
+            await _log(ctx.error("error msg"))  # at the gate: mirrored server-side
         finally:
             to_client_logger.removeHandler(handler)
-            _background_task_log_level_session_key.reset(key_token)
+            level_key_var.reset(key_token)
             _background_task_session_id.reset(session_token)
 
         assert [m for m in mirrored if "info msg" in m] == []
@@ -131,8 +155,8 @@ class TestSessionlessWorkerContextLogging:
 
         mirrored, handler = _capture_mirror()
         try:
-            await ctx.info("info msg")  # below the gate: suppressed
-            await ctx.error("error msg")  # at the gate: mirrored server-side
+            await _log(ctx.info("info msg"))  # below the gate: suppressed
+            await _log(ctx.error("error msg"))  # at the gate: mirrored server-side
         finally:
             to_client_logger.removeHandler(handler)
             _background_task_session_id.reset(session_token)
@@ -160,4 +184,6 @@ class TestSessionlessWorkerContextLogging:
         async with ctx:
             snapshot = TaskContextSnapshot.capture()
 
-        assert snapshot.log_level_session_key == expected_key
+        assert getattr(snapshot, "log_level_session_key", None) == expected_key, (
+            "the task snapshot did not capture the logging/setLevel gate key"
+        )
