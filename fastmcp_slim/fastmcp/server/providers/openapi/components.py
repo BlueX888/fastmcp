@@ -105,10 +105,10 @@ async def _send_request(
 ) -> httpx2.Response:
     """Send a request, preserving native httpx2 transport errors.
 
-    Native ``httpx2`` transport errors are re-raised unchanged so the server's
+    Native `httpx2` transport errors are re-raised unchanged so the server's
     actionable error mapping (for example, timeouts) can recognize them.
     Legacy-httpx clients, still accepted through the deprecation bridge, are
-    normalized to ``ValueError`` with the original error details.
+    normalized to `ValueError` with the original error details.
     """
     try:
         return await client.send(request)
