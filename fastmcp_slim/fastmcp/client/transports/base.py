@@ -24,6 +24,8 @@ ClientTransportT = TypeVar("ClientTransportT", bound="ClientTransport")
 #: Attribute set on factories generated from a transport's ``verify`` setting.
 #: A non-default factory without this marker was supplied by the caller (for
 #: proxies, mTLS, custom headers, ...) and takes precedence over ``verify``.
+#: The value is exactly ``True``; dynamic attribute lookup (proxies, mocks)
+#: must not be mistaken for the marker.
 _VERIFY_FACTORY_MARKER = "_fastmcp_verify_factory"
 
 
@@ -43,7 +45,7 @@ def _is_verify_replaceable_factory(factory: object) -> bool:
     """
     if factory is httpx2.AsyncClient:
         return True
-    return bool(getattr(factory, _VERIFY_FACTORY_MARKER, False))
+    return getattr(factory, _VERIFY_FACTORY_MARKER, False) is True
 
 
 class ClientSessionKwargs(TypedDict, total=False):

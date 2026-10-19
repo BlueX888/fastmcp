@@ -3,6 +3,7 @@ import ssl
 from collections.abc import AsyncIterator
 from ssl import VerifyMode
 from typing import Any, cast
+from unittest.mock import Mock
 
 import httpx2
 import pytest
@@ -305,6 +306,38 @@ class TestSSLVerify:
                 httpx_client._transport._pool._ssl_context.verify_mode  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
                 == VerifyMode.CERT_NONE
             )
+
+    @pytest.mark.parametrize(
+        ("transport_cls", "url"),
+        [
+            (StreamableHttpTransport, "https://example.com/mcp"),
+            (SSETransport, "https://example.com/sse"),
+        ],
+    )
+    def test_client_verify_preserves_factory_with_dynamic_attributes(
+        self,
+        transport_cls: type[StreamableHttpTransport] | type[SSETransport],
+        url: str,
+    ):
+        # Mock-style callables fabricate every attribute lookup, including the
+        # private marker. Those dynamic values must not be mistaken for the
+        # exact marker set on transport-generated factories.
+        mock_factory = Mock(
+            side_effect=lambda **kwargs: httpx2.AsyncClient(verify=False, **kwargs)
+        )
+        assert mock_factory._fastmcp_verify_factory
+
+        transport = transport_cls(
+            url,
+            auth=OAuth(httpx_client_factory=cast(McpHttpClientFactory, mock_factory)),
+        )
+        assert isinstance(transport.auth, OAuth)
+        assert transport.auth.httpx_client_factory is mock_factory
+
+        client = Client(transport, verify=True)
+        assert isinstance(client.transport, StreamableHttpTransport | SSETransport)
+        assert isinstance(client.transport.auth, OAuth)
+        assert client.transport.auth.httpx_client_factory is mock_factory
 
     @pytest.mark.parametrize(
         ("transport_cls", "url"),
