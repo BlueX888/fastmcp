@@ -1710,6 +1710,32 @@ async def test_new_preserves_mcp_config_transport_subclass():
     assert clone.transport._transports is not transport._transports
 
 
+async def test_new_shares_request_state_security_across_clones():
+    """MRTR request-state tokens minted by one clone must validate in another.
+
+    `create_proxy(config)` builds a fresh client per request through
+    `Client.new()`, and a guard tool's multi-round-trip can span those clients.
+    The sealing policy is held on the transport for exactly that reason, so a
+    clone must share it rather than mint a new key.
+    """
+    original = Client(
+        MCPConfig(
+            mcpServers={
+                "server1": InMemoryStdioMCPServer(mcp=_make_add_server()),
+                "server2": InMemoryStdioMCPServer(mcp=_make_add_server()),
+            }
+        )
+    )
+    assert isinstance(original.transport, MCPConfigTransport)
+    security = original.transport._request_state_security
+    assert security is not None
+
+    clone = original.new()
+
+    assert isinstance(clone.transport, MCPConfigTransport)
+    assert clone.transport._request_state_security is security
+
+
 async def test_single_server_config_transport():
     """Test that single-server configs delegate directly without creating a composite."""
     config = MCPConfig(
