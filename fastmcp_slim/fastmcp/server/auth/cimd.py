@@ -738,6 +738,20 @@ class CIMDClientManager:
         self._assertion_validator = CIMDAssertionValidator()
         self.logger = get_logger(__name__)
 
+    def restrict_scope(self, scope: str | None) -> str | None:
+        """Intersect a scope string with the server's valid_scopes allowlist.
+
+        CIMD documents are client-controlled, so a declared scope must never
+        widen the server's policy. Returns None when no requested scope
+        survives the intersection. When valid_scopes is unset (direct manager
+        use), the input is returned unchanged.
+        """
+        if scope is None or self.valid_scopes is None:
+            return scope
+        allowed = set(self.valid_scopes)
+        filtered = " ".join(s for s in scope.split(" ") if s and s in allowed)
+        return filtered or None
+
     def is_cimd_client_id(self, client_id: str) -> bool:
         """Check if client_id is a CIMD URL.
 
@@ -781,10 +795,7 @@ class CIMDClientManager:
         # scope gate instead of being forwarded upstream. When the document
         # omits scope, fall back to the manager's default unchanged.
         if cimd_doc.scope:
-            scope = cimd_doc.scope
-            if self.valid_scopes is not None:
-                allowed = set(self.valid_scopes)
-                scope = " ".join(s for s in scope.split(" ") if s and s in allowed)
+            scope = self.restrict_scope(cimd_doc.scope)
         else:
             scope = self.default_scope
 

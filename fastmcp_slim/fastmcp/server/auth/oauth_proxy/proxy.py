@@ -958,6 +958,12 @@ class OAuthProxy(OAuthProvider, ConsentMixin):
                     await self._client_store.delete(key=client_id)
                 return cimd_client
             if client is not None:
+                # A record persisted by an older version still carries its
+                # verbatim document scope. Constrain it with the same
+                # allowlist as freshly fetched documents before returning it
+                # as a fallback.
+                if client.cimd_document is not None:
+                    client.scope = self._cimd_manager.restrict_scope(client.scope)
                 return client
 
         # Some MCP clients (e.g. claude.ai) skip Dynamic Client Registration and

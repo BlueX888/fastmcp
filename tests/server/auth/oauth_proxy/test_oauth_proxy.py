@@ -12,9 +12,9 @@ from pydantic import AnyHttpUrl, AnyUrl
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
-from fastmcp.server.auth.cimd import CIMDDocument, CIMDFetcher
+from fastmcp.server.auth.cimd import CIMDDocument, CIMDFetcher, CIMDFetchError
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
-from fastmcp.server.auth.oauth_proxy.models import OAuthTransaction
+from fastmcp.server.auth.oauth_proxy.models import OAuthTransaction, ProxyDCRClient
 from fastmcp.server.auth.oauth_proxy.upstream import AsyncOAuth2Client
 
 
@@ -795,3 +795,50 @@ class TestCIMDScopeEnforcement:
         transaction = await proxy._transaction_store.get(key=txn_id)
         assert transaction is not None
         assert transaction.scopes == ["read"]
+
+    async def test_legacy_stored_cimd_client_scope_is_sanitized(self, jwt_verifier):
+        """A persisted pre-fix CIMD client cannot keep an out-of-policy scope.
+
+        Older versions stored CIMD clients in the DCR client store. When the
+        refresh fetch fails, the stored record is returned as a fallback; its
+        verbatim document scope must still be constrained by valid_scopes.
+        """
+        proxy = self._proxy(jwt_verifier)
+        legacy_client = ProxyDCRClient(
+            client_id=self.CIMD_URL,
+            client_secret=None,
+            redirect_uris=None,
+            scope="admin",
+            token_endpoint_auth_method="none",
+            cimd_document=self._doc("admin"),
+            cimd_fetched_at=time.time(),
+        )
+        await proxy._client_store.put(key=self.CIMD_URL, value=legacy_client)
+
+        app = Starlette(routes=proxy.get_routes())
+
+        async def failing_fetch(fetcher, url: str) -> CIMDDocument:
+            raise CIMDFetchError("refresh failed")
+
+        transport = httpx2.ASGITransport(app=app)
+        with (
+            patch.object(CIMDFetcher, "fetch", failing_fetch),
+            patch.object(proxy._transaction_store, "put", new=AsyncMock()) as store_put,
+        ):
+            async with httpx2.AsyncClient(
+                transport=transport,
+                base_url="https://mcp.example.com",
+                follow_redirects=False,
+            ) as client:
+                response = await client.get(
+                    "/authorize", params=self._authorize_params("admin")
+                )
+
+        assert response.status_code == 302
+        location = response.headers["location"]
+        params = parse_qs(urlparse(location).query)
+        assert params["error"] == ["invalid_scope"]
+        # The legacy out-of-policy scope was never forwarded or recorded.
+        assert "idp.example.com" not in location
+        assert "scope=admin" not in location
+        store_put.assert_not_awaited()
