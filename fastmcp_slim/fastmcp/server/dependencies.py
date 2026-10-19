@@ -241,6 +241,16 @@ _background_task_session_id: ContextVar[str | None] = ContextVar(
     "fastmcp_background_task_session_id", default=None
 )
 
+#: The exact ``logging/setLevel`` gate key of the submitting session, captured
+#: into the task snapshot. It is not the same value as the session id above:
+#: setLevel stores its gate under ``_log_level_session_key(session)``
+#: (``connection.session_id`` or the ``"__no_session__"`` sentinel), while
+#: ``Context.session_id`` may be a generated UUID or cached state prefix. A
+#: worker has no session to derive the key from, so the snapshot carries it.
+_background_task_log_level_session_key: ContextVar[str | None] = ContextVar(
+    "fastmcp_background_task_log_level_session_key", default=None
+)
+
 
 class _ClientToolCall:
     """One ``tools/call`` a client sent, until its first dispatch claims it."""

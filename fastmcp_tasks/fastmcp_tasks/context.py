@@ -167,6 +167,7 @@ class TaskContextSnapshot:
     http_headers: dict[str, str] | None = None
     origin_request_id: str | None = None
     session_id: str | None = None
+    log_level_session_key: str | None = None
     owning_tool_name: str | None = None
     owning_tool_version: str | None = None
 
@@ -185,7 +186,9 @@ class TaskContextSnapshot:
         ``make_task_context``. The version matters when two versions of the same
         mounted tool name live on different child servers.
         """
+        from fastmcp.server.context import _log_level_session_key
         from fastmcp.server.dependencies import (
+            _background_task_log_level_session_key,
             get_access_token,
             get_context,
             get_http_headers,
@@ -198,6 +201,23 @@ class TaskContextSnapshot:
             session_id = ctx.session_id
         except RuntimeError:
             session_id = None
+
+        # Capture the key logging/setLevel actually stored this client's gate
+        # under, while the submitting session is still live. Reusing
+        # ``session_id`` here would be wrong: for stdio/SSE/in-memory that
+        # property generates a UUID (or a cached state prefix) while setLevel
+        # wrote the session-less sentinel. When capture itself runs in a worker
+        # (a nested task), carry the parent task's key forward.
+        try:
+            session = ctx.session
+        except RuntimeError:
+            session = None
+        log_level_session_key = (
+            _log_level_session_key(session)
+            if session is not None
+            else _background_task_log_level_session_key.get()
+        )
+
         return cls(
             access_token_json=(
                 access_token.model_dump_json() if access_token else None
@@ -207,6 +227,7 @@ class TaskContextSnapshot:
                 str(request_context.request_id) if request_context is not None else None
             ),
             session_id=session_id,
+            log_level_session_key=log_level_session_key,
             owning_tool_name=owning_tool_name,
             owning_tool_version=owning_tool_version,
         )
@@ -225,6 +246,7 @@ class TaskContextSnapshot:
             http_headers=headers,
             origin_request_id=parsed.get("origin_request_id"),
             session_id=parsed.get("session_id"),
+            log_level_session_key=parsed.get("log_level_session_key"),
             owning_tool_name=parsed.get("owning_tool_name"),
             owning_tool_version=parsed.get("owning_tool_version"),
         )
@@ -237,6 +259,7 @@ class TaskContextSnapshot:
                 "http_headers": self.http_headers,
                 "origin_request_id": self.origin_request_id,
                 "session_id": self.session_id,
+                "log_level_session_key": self.log_level_session_key,
                 "owning_tool_name": self.owning_tool_name,
                 "owning_tool_version": self.owning_tool_version,
             }
@@ -561,6 +584,7 @@ def _apply_snapshot_to_context(snapshot: TaskContextSnapshot) -> None:
     from fastmcp.server.auth import AccessToken
     from fastmcp.server.dependencies import (
         _background_task_headers,
+        _background_task_log_level_session_key,
         _background_task_session_id,
     )
 
@@ -579,6 +603,7 @@ def _apply_snapshot_to_context(snapshot: TaskContextSnapshot) -> None:
         dict(snapshot.http_headers) if snapshot.http_headers else None
     )
     _background_task_session_id.set(snapshot.session_id)
+    _background_task_log_level_session_key.set(snapshot.log_level_session_key)
 
 
 async def make_task_context() -> Context | None:

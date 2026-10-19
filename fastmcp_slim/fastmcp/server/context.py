@@ -648,14 +648,21 @@ class Context:
                 _log_level_session_key(session)
             )
         else:
-            from fastmcp.server.dependencies import _background_task_session_id
-
-            task_session_id = _background_task_session_id.get()
-            session_min = (
-                self.fastmcp._client_log_levels.get(task_session_id)
-                if task_session_id is not None
-                else None
+            from fastmcp.server.dependencies import (
+                _background_task_log_level_session_key,
             )
+
+            # Same key logging/setLevel stored the gate under. The snapshot
+            # captured it from the live submitting session because a worker's
+            # session id is a different value (a generated UUID or cached state
+            # prefix) and would miss the gate. A context built without that
+            # snapshot (e.g. a legacy one) has no session, so it falls back to
+            # the sentinel that _log_level_session_key uses for session-less
+            # connections.
+            level_key = _background_task_log_level_session_key.get()
+            if level_key is None:
+                level_key = _log_level_session_key(None)
+            session_min = self.fastmcp._client_log_levels.get(level_key)
         if session_min is not None:
             min_level = session_min
 
@@ -1335,13 +1342,14 @@ def _detached_request_context(context: Context) -> ServerRequestContext:
     )
 
 
-def _log_level_session_key(session: ServerSession) -> str:
+def _log_level_session_key(session: ServerSession | None) -> str:
     """Derive the per-session key used for logging/setLevel gating.
 
     v2 constructs sessions per-request, so the stable identity is the
     connection session id (stateful HTTP). stdio/in-memory has no session id,
     so a sentinel key is used — all such connections share one gate, matching
-    the single-connection nature of those transports.
+    the single-connection nature of those transports. ``None`` (a worker with
+    no live session) is session-less by definition and takes the sentinel too.
     """
     connection = getattr(session, "_connection", None)
     session_id = getattr(connection, "session_id", None) if connection else None
@@ -1361,7 +1369,12 @@ async def _log_to_server_and_client(
         if _MCP_LEVEL_SEVERITY[level] < _MCP_LEVEL_SEVERITY[min_level]:
             return
 
-    msg_prefix = f"Sending {level.upper()} to client"
+    # A session-less context (e.g. a background-task worker) has no client to
+    # notify, so the mirrored record must not claim a client send.
+    if session is None:
+        msg_prefix = f"Logging {level.upper()} server-side"
+    else:
+        msg_prefix = f"Sending {level.upper()} to client"
 
     if logger_name:
         msg_prefix += f" ({logger_name})"
@@ -1373,8 +1386,7 @@ async def _log_to_server_and_client(
     )
 
     if session is None:
-        # Session-less context (e.g. a background-task worker): the record is
-        # already mirrored server-side above, and there is no client to notify.
+        # Already mirrored server-side above; there is no client to notify.
         return
 
     # Deprecated upstream in SDK v2 but deliberately kept per compat directive;
