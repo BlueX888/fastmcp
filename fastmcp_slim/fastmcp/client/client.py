@@ -768,9 +768,9 @@ class Client(
     def new(self) -> Client[ClientTransportT]:
         """Create a new client instance with the same configuration but fresh session state.
 
-        This creates a new client with the same transport, handlers, and configuration,
-        but with no active session. Useful for creating independent sessions that don't
-        share state with the original client.
+        This creates a new client with the same transport configuration, handlers,
+        and other settings, but with no active session. Useful for creating
+        independent sessions that don't share state with the original client.
 
         Returns:
             A new Client instance with the same configuration but disconnected state.
@@ -784,6 +784,21 @@ class Client(
             ```
         """
         new_client = copy.copy(self)
+
+        # A config transport owns the backend transports of its active
+        # connection (`connect_session` opens them, `close` tears them down).
+        # Those are connection-scoped, so the clone gets an independent
+        # transport over the same config instead of sharing that state. Without
+        # this, closing a clone that never connected would close the original's
+        # live backends — the symmetric case of a clone connecting (see #5618).
+        if isinstance(self.transport, MCPConfigTransport):
+            new_client.transport = cast(
+                ClientTransportT,
+                MCPConfigTransport(
+                    self.transport.config,
+                    name_as_prefix=self.transport.name_as_prefix,
+                ),
+            )
 
         # Always reset session state so cloned clients start disconnected and do not
         # share lifecycle state with the original instance.

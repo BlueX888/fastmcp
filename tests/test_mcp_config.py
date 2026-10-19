@@ -1382,6 +1382,91 @@ async def test_multi_server_clone_does_not_close_original_backends():
     assert len(closed) == 4
 
 
+def _two_tracked_add_servers(closed: list[FastMCPTransport]) -> MCPConfig:
+    return MCPConfig(
+        mcpServers={
+            "server1": ClosingInMemoryStdioMCPServer(
+                mcp=_make_add_server(), closed=closed
+            ),
+            "server2": ClosingInMemoryStdioMCPServer(
+                mcp=_make_add_server(), closed=closed
+            ),
+        }
+    )
+
+
+async def test_unconnected_original_close_does_not_close_live_clone_backends():
+    """Closing a never-connected original must leave a live clone's backends alone.
+
+    The symmetric case of #5618: `Client.new()` clones share the original's
+    transport, so a transport-wide backend list lets an unconnected client
+    tear down a connected sibling's backends.
+    """
+    closed: list[FastMCPTransport] = []
+    original = Client(_two_tracked_add_servers(closed))
+    clone = original.new()
+
+    async with clone:
+        result = await clone.call_tool("server1_add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+        await original.close()
+        assert closed == []
+
+        result = await clone.call_tool("server2_add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+    assert len(closed) == 2
+
+
+async def test_unconnected_clone_close_does_not_close_live_original_backends():
+    """Closing a never-connected clone must leave the original's backends alone."""
+    closed: list[FastMCPTransport] = []
+    original = Client(_two_tracked_add_servers(closed))
+    clone = original.new()
+
+    async with original:
+        result = await original.call_tool("server1_add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+        await clone.close()
+        assert closed == []
+
+        result = await original.call_tool("server2_add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+    assert len(closed) == 2
+
+
+async def test_connected_client_close_tears_down_only_its_own_backends():
+    """A connected client's close releases its own backends, not a clone's."""
+    closed: list[FastMCPTransport] = []
+    original = Client(_two_tracked_add_servers(closed))
+    clone = original.new()
+
+    async with original:
+        assert isinstance(original.transport, MCPConfigTransport)
+        original_transports = list(original.transport._transports)
+        assert len(original_transports) == 2
+
+        async with clone:
+            assert isinstance(clone.transport, MCPConfigTransport)
+            clone_transports = list(clone.transport._transports)
+            assert len(clone_transports) == 2
+            assert not set(original_transports) & set(clone_transports)
+
+            await original.close()
+
+            # `close()` tears down the original's current connection; the
+            # clone's still-live backends are untouched.
+            assert set(closed) == set(original_transports)
+            result = await clone.call_tool("server1_add", {"a": 1, "b": 2})
+            assert result.data == 3
+
+        # Leaving the clone releases its own backends too.
+        assert set(closed) == set(original_transports) | set(clone_transports)
+
+
 async def test_single_server_config_transport():
     """Test that single-server configs delegate directly without creating a composite."""
     config = MCPConfig(
