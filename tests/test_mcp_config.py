@@ -258,6 +258,40 @@ async def test_multi_server_auto_falls_back_all_legs_when_one_backend_is_legacy(
     assert starts.count("legacy") == 1
 
 
+async def test_clone_era_resolution_is_observable_on_source_transport():
+    """A clone's connect resolves `legacy_only` on the transport it copied.
+
+    Adapters such as langchain's MCPAdapter hold the source transport while
+    `Client.new()` performs each connection. Before clones got per-instance
+    state the two shared one object, so the source observed the resolution;
+    keep that behavior while teardown stays ownership-scoped.
+    """
+    starts: list[str] = []
+    config = MCPConfig(
+        mcpServers={
+            "modern": InMemoryStdioMCPServer(
+                mcp=_make_protocol_era_server("modern", starts)
+            ),
+            "legacy": LegacyInMemoryStdioMCPServer(
+                mcp=_make_protocol_era_server("legacy", starts)
+            ),
+        }
+    )
+    transport = MCPConfigTransport(config)
+    client = Client(transport)
+    clone = client.new()
+
+    assert transport.legacy_only is False
+
+    async with clone:
+        assert isinstance(clone.transport, MCPConfigTransport)
+        assert clone.transport.legacy_only is True
+        assert transport.legacy_only is True
+
+    # The resolution is connection-scoped, so it resets on disconnect.
+    assert transport.legacy_only is False
+
+
 async def test_legacy_first_connection_preserves_declared_mount_precedence():
     starts: list[str] = []
     modern = _make_protocol_era_server("modern", starts)
