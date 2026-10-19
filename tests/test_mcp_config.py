@@ -901,6 +901,39 @@ async def test_remote_config_with_oauth_literal():
     assert isinstance(client.transport.transport.auth, OAuthClientProvider)
 
 
+async def test_remote_config_oauth_survives_new_clone():
+    """A `new()` clone reuses the OAuth provider and its token store.
+
+    Rebuilding a single-server config transport from raw config would construct
+    a second `OAuth` with a fresh `MemoryStore`, losing every token acquired by
+    the source client. Proxy factories call `new()` per request, so that would
+    launch a new interactive authorization flow on every request.
+    """
+    config = {
+        "mcpServers": {
+            "test_server": {
+                "url": "http://localhost:8000",
+                "auth": "oauth",
+            }
+        }
+    }
+    original = Client(config)
+    assert isinstance(original.transport, MCPConfigTransport)
+    assert isinstance(original.transport.transport, StreamableHttpTransport)
+    auth = original.transport.transport.auth
+    assert isinstance(auth, OAuthClientProvider)
+
+    clone = original.new()
+    assert isinstance(clone.transport, MCPConfigTransport)
+    assert clone.transport is not original.transport
+    assert isinstance(clone.transport.transport, StreamableHttpTransport)
+    assert clone.transport.transport.auth is auth
+    assert (
+        clone.transport.transport.auth.token_storage_adapter
+        is auth.token_storage_adapter
+    )
+
+
 def _make_log_server() -> FastMCP:
     app = FastMCP()
 
@@ -1465,6 +1498,55 @@ async def test_connected_client_close_tears_down_only_its_own_backends():
 
         # Leaving the clone releases its own backends too.
         assert set(closed) == set(original_transports) | set(clone_transports)
+
+
+async def test_unconnected_original_close_does_not_close_live_single_server_clone():
+    """Single-server configs share their built backend; a close must not disturb it."""
+    closed: list[FastMCPTransport] = []
+    config = MCPConfig(
+        mcpServers={
+            "only": ClosingInMemoryStdioMCPServer(mcp=_make_add_server(), closed=closed)
+        }
+    )
+    original = Client(config)
+    clone = original.new()
+
+    async with clone:
+        result = await clone.call_tool("add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+        await original.close()
+        assert closed == []
+
+        result = await clone.call_tool("add", {"a": 1, "b": 2})
+        assert result.data == 3
+
+
+class CustomMCPConfigTransport(MCPConfigTransport):
+    """A public subclass `Client.new()` must preserve rather than flatten."""
+
+    marker = "custom"
+
+
+async def test_new_preserves_mcp_config_transport_subclass():
+    transport = CustomMCPConfigTransport(
+        MCPConfig(
+            mcpServers={
+                "only": InMemoryStdioMCPServer(mcp=_make_add_server()),
+            }
+        )
+    )
+    client = Client(transport)
+
+    clone = client.new()
+
+    assert type(clone.transport) is CustomMCPConfigTransport
+    assert clone.transport is not transport
+    assert clone.transport.marker == "custom"
+    assert clone.transport.config is transport.config
+    # The eagerly-built backend is shared, preserving auth state such as OAuth.
+    assert clone.transport.transport is transport.transport
+    assert clone.transport._transports is not transport._transports
 
 
 async def test_single_server_config_transport():

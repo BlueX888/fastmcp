@@ -787,17 +787,15 @@ class Client(
 
         # A config transport owns the backend transports of its active
         # connection (`connect_session` opens them, `close` tears them down).
-        # Those are connection-scoped, so the clone gets an independent
-        # transport over the same config instead of sharing that state. Without
-        # this, closing a clone that never connected would close the original's
-        # live backends — the symmetric case of a clone connecting (see #5618).
+        # Those are connection-scoped, so the clone gets its own transport
+        # instance with fresh connection state while still sharing the config,
+        # the concrete subclass, and eagerly-built backends such as an OAuth
+        # provider and its token store. Without this, closing a clone that
+        # never connected would close the original's live backends — the
+        # symmetric case of a clone connecting (see #5618).
         if isinstance(self.transport, MCPConfigTransport):
             new_client.transport = cast(
-                ClientTransportT,
-                MCPConfigTransport(
-                    self.transport.config,
-                    name_as_prefix=self.transport.name_as_prefix,
-                ),
+                ClientTransportT, self.transport.copy_for_new_client()
             )
 
         # Always reset session state so cloned clients start disconnected and do not

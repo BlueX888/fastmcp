@@ -1,4 +1,5 @@
 import contextlib
+import copy
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
@@ -86,11 +87,16 @@ class MCPConfigTransport(ClientTransport):
         self.name_as_prefix = name_as_prefix
         # Backend transports for the most recent connection opened by *this*
         # transport instance. They are connection-scoped, so a `Client.new()`
-        # clone must own a separate MCPConfigTransport rather than sharing this
-        # list: `close()` on one client must not tear down another's backends.
+        # clone gets its own `_transports` list (see `copy_for_new_client`):
+        # `close()` on one client must not tear down another's backends.
         self._transports: list[ClientTransport] = []
         self._request_state_security: RequestStateSecurity | None = None
         self._resolved_legacy_only = False
+        # Whether this instance has opened a connection that may need closing.
+        # A clone that never connected must not close backends it has never
+        # used (single-server configs share the eagerly-built backend with the
+        # source client, so an unconditional close would still break it).
+        self._has_connected = False
 
         if not self.config.mcpServers:
             raise ValueError("No MCP servers defined in the config")
@@ -116,6 +122,27 @@ class MCPConfigTransport(ClientTransport):
 
             self._request_state_security = _RequestStateSecurity.ephemeral()
 
+    def copy_for_new_client(self) -> "MCPConfigTransport":
+        """Return a transport for a `Client.new()` clone.
+
+        The clone shares configuration and the already-built backend transports
+        (notably an OAuth provider and its token store) but starts its own
+        connection: the connection-scoped `_transports` list and connection
+        markers are per-instance. A shallow copy preserves the concrete class,
+        so a public `MCPConfigTransport` subclass keeps its behavior and any
+        extra attributes.
+        """
+        clone = copy.copy(self)
+        # Single-server configs reuse the eagerly-built backend transport, which
+        # carries auth state (e.g. the OAuth token store) that must survive a
+        # clone. Multi-server configs build backends per connection, so the
+        # clone starts with none.
+        backend = getattr(self, "transport", None)
+        clone._transports = [backend] if backend is not None else []
+        clone._resolved_legacy_only = False
+        clone._has_connected = False
+        return clone
+
     @property
     def legacy_only(self) -> bool:  # ty:ignore[invalid-property-type-override]
         """Whether the connected composite resolved to the legacy protocol era.
@@ -137,6 +164,10 @@ class MCPConfigTransport(ClientTransport):
         transport_options: TransportOptions | None = None,
         **session_kwargs: Unpack[SessionKwargs],
     ) -> AsyncGenerator[ClientSession, None]:
+        # This instance now owns a connection whose backends `close()` may
+        # need to release (e.g. a keep-alive stdio subprocess).
+        self._has_connected = True
+
         # Single server - delegate directly to pre-created transport
         if len(self.config.mcpServers) == 1:
             config = next(iter(self.config.mcpServers.values()))
@@ -406,6 +437,13 @@ class MCPConfigTransport(ClientTransport):
         return transport, client, proxy
 
     async def close(self):
+        # Only release backends this instance has actually connected to. A
+        # client that never connected has nothing to tear down, and for
+        # single-server configs its backend transport is shared with the source
+        # client, so closing it would reach into that client's live connection.
+        if not self._has_connected:
+            return
+        self._has_connected = False
         for transport in self._transports:
             await transport.close()
 
