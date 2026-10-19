@@ -7,6 +7,7 @@ from mcp.types import TextResourceContents
 from pydantic import BaseModel, Field, ValidationError
 
 from fastmcp import Client, Context, FastMCP
+from fastmcp.exceptions import ResourceError
 from fastmcp.resources import ResourceTemplate
 from fastmcp.resources.function_resource import FunctionResource
 from fastmcp.resources.template import (
@@ -885,6 +886,60 @@ class TestResourceTemplateFieldAliases:
 
         with pytest.raises(ValidationError, match="Unexpected keyword argument"):
             await template.read({"id": "7", "extra": "x"})
+
+    async def test_alias_colliding_with_sibling_parameter_is_rejected(self):
+        """An alias matching a sibling's Python name must not clobber it."""
+
+        def v(id: int = Field(alias="limit"), limit: int = 10) -> str:
+            return f"id={id};limit={limit}"
+
+        template = ResourceTemplate.from_function(
+            fn=v,
+            uri_template="data://v/{id}",
+            name="v",
+        )
+        mcp = FastMCP("test")
+        mcp.add_template(template)
+
+        # Supplying the URI path value still fails loudly instead of filling
+        # `limit` from the `id` alias and clobbering the sibling default.
+        with pytest.raises(ResourceError, match="Unexpected keyword argument"):
+            await mcp.read_resource("data://v/7")
+
+        # Direct reads with the colliding alias are rejected as ambiguous
+        # rather than populating both parameters with one value.
+        with pytest.raises(ValueError, match="ambiguous"):
+            await template.read({"limit": "7"})
+        with pytest.raises(ValueError, match="ambiguous"):
+            await template.read({"id": "7", "limit": "7"})
+
+    async def test_colliding_alias_keeps_path_and_query_distinct(self):
+        """A query param sharing the other param's alias must not drop the path."""
+
+        def pair(id: str = Field(alias="other"), other: str = "fallback") -> str:
+            return f"id={id};other={other}"
+
+        template = ResourceTemplate.from_function(
+            fn=pair,
+            uri_template="data://pair/{id}{?other}",
+            name="pair",
+        )
+        assert template.matches("data://pair/path?other=query") == {
+            "id": "path",
+            "other": "query",
+        }
+
+        mcp = FastMCP("test")
+        mcp.add_template(template)
+        with pytest.raises(ResourceError, match="ambiguous"):
+            await mcp.read_resource("data://pair/path?other=query")
+
+        # Direct reads fail loudly under either spelling: the Python name is
+        # unexpected in the call schema, and the alias is ambiguous.
+        with pytest.raises(ValidationError, match="Unexpected keyword argument"):
+            await template.read({"id": "path"})
+        with pytest.raises(ValueError, match="ambiguous"):
+            await template.read({"other": "query"})
 
 
 class TestMalformedURITemplates:

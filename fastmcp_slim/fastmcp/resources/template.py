@@ -102,7 +102,9 @@ def extract_exploded_query_params(uri_template: str) -> set[str]:
     return set()
 
 
-def _python_names_by_call_name(fn: Callable[..., Any]) -> dict[str, str]:
+def _python_names_by_call_name(
+    fn: Callable[..., Any],
+) -> tuple[dict[str, str], frozenset[str]]:
     """Map names in Pydantic's call schema to Python parameter names.
 
     ``validate_call`` builds its schema from ``Field`` metadata, so a parameter
@@ -111,17 +113,30 @@ def _python_names_by_call_name(fn: Callable[..., Any]) -> dict[str, str]:
     their Python names, so reads need this mapping to translate extracted
     params to the names the call schema expects. Non-aliased parameters need no
     entry.
+
+    An alias that equals a different parameter's Python name (or another
+    parameter's alias) makes the call schema ambiguous: a single keyword would
+    populate two parameters, or our inverse mapping would merge two arguments
+    into one. Those names are left out of the mapping and returned separately
+    so reads can fail loudly instead of cross-wiring values.
     """
     try:
         sig = inspect.signature(fn)
     except (TypeError, ValueError):
-        return {}
+        return {}, frozenset()
     try:
         hints = get_function_type_hints(fn)
     except Exception:
         hints = getattr(fn, "__annotations__", {})
 
+    signature_names = {
+        name
+        for name, param in sig.parameters.items()
+        if param.kind
+        not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+    }
     mapping: dict[str, str] = {}
+    ambiguous: set[str] = set()
     for param_name, param in sig.parameters.items():
         if param.kind in (
             inspect.Parameter.VAR_POSITIONAL,
@@ -155,9 +170,15 @@ def _python_names_by_call_name(fn: Callable[..., Any]) -> dict[str, str]:
         call_name = field_info.validation_alias
         if not isinstance(call_name, str):
             call_name = field_info.alias
-        if isinstance(call_name, str) and call_name != param_name:
+        if not isinstance(call_name, str) or call_name == param_name:
+            continue
+        if call_name in signature_names or call_name in mapping:
+            # A keyword under this name would fill two parameters.
+            ambiguous.add(call_name)
+            mapping.pop(call_name, None)
+        else:
             mapping[call_name] = param_name
-    return mapping
+    return mapping, frozenset(ambiguous)
 
 
 # RFC 3986 reserved characters, which stay as written in a template literal.
@@ -635,6 +656,8 @@ class FunctionResourceTemplate(ResourceTemplate):
     # for parameters whose Pydantic alias differs from the signature name.
     _python_names_by_call_name: dict[str, str] = PrivateAttr(default_factory=dict)
     _call_names_by_python_name: dict[str, str] = PrivateAttr(default_factory=dict)
+    # Aliases that collide with another parameter's call or Python name.
+    _ambiguous_call_names: frozenset[str] = PrivateAttr(default_factory=frozenset)
 
     async def _read(self, uri: str, params: dict[str, Any]) -> ResourceResult:
         """Optimized server entry point that skips ephemeral resource creation.
@@ -670,6 +693,17 @@ class FunctionResourceTemplate(ResourceTemplate):
 
     async def read(self, arguments: dict[str, Any]) -> str | bytes | ResourceResult:
         """Read the resource content."""
+        # An alias that collides with another parameter's name cannot be
+        # translated without merging two values into one call-schema keyword.
+        # Fail loudly rather than silently dropping an argument.
+        ambiguous = self._ambiguous_call_names.intersection(arguments)
+        if ambiguous:
+            names = ", ".join(sorted(ambiguous))
+            raise ValueError(
+                f"Resource template arguments {names} are ambiguous: a Pydantic "
+                "alias matches another parameter's name. Rename the alias or "
+                "the parameter."
+            )
         # URI/query extraction uses Python parameter names, while validate_call
         # accepts Field aliases. Normalize either spelling to the Python name
         # for type coercion below, then translate back to the call-schema name.
@@ -902,8 +936,11 @@ class FunctionResourceTemplate(ResourceTemplate):
         parameters = compress_schema(parameters, prune_titles=True)
 
         # The call schema advertises aliases, so keep the link back to the
-        # Python parameter that the URI template addresses.
-        python_names_by_call_name = _python_names_by_call_name(wrapper_fn)
+        # Python parameter that the URI template addresses. Colliding names
+        # are tracked separately so reads can reject them explicitly.
+        python_names_by_call_name, ambiguous_call_names = _python_names_by_call_name(
+            wrapper_fn
+        )
 
         # Use validate_call on wrapper for runtime type coercion
         fn = validate_call(wrapper_fn)
@@ -933,4 +970,5 @@ class FunctionResourceTemplate(ResourceTemplate):
             python_name: call_name
             for call_name, python_name in python_names_by_call_name.items()
         }
+        template._ambiguous_call_names = ambiguous_call_names
         return template
