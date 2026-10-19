@@ -325,10 +325,10 @@ async def run_v1_server_async(
     server: SDKServer,
     host: str | None = None,
     port: int | None = None,
+    transport: TransportType | None = None,
     path: str | None = None,
     stateless: bool = False,
     log_level: LogLevelType | None = None,
-    transport: TransportType | None = None,
 ) -> None:
     """Run a FastMCP 1.x server using async methods.
 
@@ -336,6 +336,7 @@ async def run_v1_server_async(
         server: FastMCP 1.x server instance
         host: Host to bind to
         port: Port to bind to
+        transport: Transport protocol to use
         path: Route path for the HTTP endpoint (Streamable HTTP or SSE)
         stateless: Whether to run Streamable HTTP without sessions. The SDK's
             SSE transport has no stateless mode, so it is ignored for SSE.
@@ -343,7 +344,6 @@ async def run_v1_server_async(
             accepts ``log_level`` at construction time, but its HTTP runners read
             ``settings.log_level`` (for uvicorn), so the setting is updated before
             starting. The stdio runner does not consult it.
-        transport: Transport protocol to use
     """
     # In v1 (MCPServer), host/port are no longer stored on `settings`; they are
     # passed directly to the transport runners as keyword arguments.

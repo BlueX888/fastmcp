@@ -494,6 +494,36 @@ async def async_echo(text: str) -> str:
             # Only host/port are forwarded; path/stateless stay at SDK defaults.
             run_mock.assert_called_once_with(host="0.0.0.0", port=9000)
 
+    async def test_run_v1_server_transport_is_fourth_positional(self):
+        """The documented positional call must keep binding ``transport`` fourth.
+
+        ``run_v1_server_async(server, host, port, "sse")`` previously bound
+        ``"sse"`` to ``path`` and started Streamable HTTP instead of SSE.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from mcp.server.mcpserver import MCPServer as SDKServer
+
+        from fastmcp.cli.run import run_v1_server_async
+
+        server = SDKServer("V1Server")
+        with (
+            patch.object(
+                SDKServer, "run_stdio_async", new_callable=AsyncMock
+            ) as stdio_mock,
+            patch.object(
+                SDKServer, "run_streamable_http_async", new_callable=AsyncMock
+            ) as http_mock,
+            patch.object(
+                SDKServer, "run_sse_async", new_callable=AsyncMock
+            ) as sse_mock,
+        ):
+            await run_v1_server_async(server, "0.0.0.0", 9000, "sse")
+
+        sse_mock.assert_awaited_once_with(host="0.0.0.0", port=9000)
+        http_mock.assert_not_awaited()
+        stdio_mock.assert_not_awaited()
+
     async def test_run_v1_server_http_with_path_and_stateless(self, tmp_path):
         """Test that v1 Streamable HTTP receives --path and --stateless."""
         from unittest.mock import AsyncMock, patch
