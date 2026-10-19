@@ -15,6 +15,23 @@ from fastmcp.server.providers.skills import (
 )
 from fastmcp.server.providers.skills._common import parse_frontmatter
 from fastmcp.server.providers.skills.skill_provider import SkillFileResource
+from fastmcp.server.transforms import Transform
+
+
+class _TemplateMetaTransform(Transform):
+    """Attach template-level meta, emulating a user transform."""
+
+    async def list_resource_templates(self, templates):
+        return [
+            template.model_copy(update={"meta": {"team": "infra"}})
+            for template in templates
+        ]
+
+    async def get_resource_template(self, uri, call_next, *, version=None):
+        template = await call_next(uri, version=version)
+        if template is None:
+            return None
+        return template.model_copy(update={"meta": {"team": "infra"}})
 
 
 class TestParseFrontmatter:
@@ -486,6 +503,23 @@ This is my skill content.
             "mime-skill/reference.md",
         ]
         assert await resources_provider.list_resource_templates() == []
+
+    async def test_template_meta_propagates_to_supporting_file_contents(
+        self, mime_skill_dir: Path
+    ):
+        """Template-level meta reaches content items, as convert_result did."""
+        provider = SkillProvider(skill_path=mime_skill_dir)
+        provider.add_transform(_TemplateMetaTransform())
+
+        mcp = FastMCP("Test")
+        mcp.add_provider(provider)
+
+        async with Client(mcp) as client:
+            for filename in ("reference.md", "data.json"):
+                result = await client.read_resource(
+                    AnyUrl(f"skill://mime-skill/{filename}")
+                )
+                assert result[0].meta == {"team": "infra"}
 
     async def test_read_supporting_file_with_space_in_name(self, tmp_path: Path):
         """Percent-encoded resource URIs for supporting files must round-trip (#4545)."""

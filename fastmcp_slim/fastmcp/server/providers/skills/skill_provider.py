@@ -21,6 +21,7 @@ from fastmcp.server.providers.skills._common import (
     resolve_within,
     scan_skill_files,
 )
+from fastmcp.utilities.components import public_result_meta
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.versions import VersionSpec
 
@@ -123,6 +124,7 @@ class SkillFileTemplate(ResourceTemplate):
                 ResourceContent(
                     result,
                     mime_type=self._guess_mime_type(params.get("path", "")),
+                    meta=public_result_meta(self.meta),
                 )
             ]
         )
