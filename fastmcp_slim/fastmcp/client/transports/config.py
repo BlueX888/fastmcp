@@ -107,6 +107,13 @@ class MCPConfigTransport(ClientTransport):
         self._backend_local_users: dict[int, int] = {}
         self._request_state_security: RequestStateSecurity | None = None
         self._resolved_legacy_only = False
+        # The transport a clone copied from, if any. Era resolution is
+        # connection-scoped, but callers historically observed it through the
+        # transport they held even when `Client.new()` did the connecting
+        # (both shared one object before clones got per-instance state).
+        # Mirroring keeps that observable behavior without sharing teardown
+        # state. Chains of clones resolve to the most recent connection.
+        self._era_source: MCPConfigTransport | None = None
 
         if not self.config.mcpServers:
             raise ValueError("No MCP servers defined in the config")
@@ -157,7 +164,23 @@ class MCPConfigTransport(ClientTransport):
         clone._participated_backends = []
         clone._backend_local_users = {}
         clone._resolved_legacy_only = False
+        # Keep the source's observable era in sync with the clone's
+        # connections without sharing connection/ownership state.
+        clone._era_source = self
         return clone
+
+    def _set_resolved_legacy_only(self, value: bool) -> None:
+        """Record an era resolution and mirror it onto the clone's source.
+
+        `legacy_only` is read after connecting by callers that may hold the
+        source transport while a `Client.new()` clone performs the connection
+        (e.g. adapters that clone per operation). Publish the latest resolution
+        up the copy chain, as the pre-clone shared-object behavior did.
+        """
+        transport: MCPConfigTransport | None = self
+        while transport is not None:
+            transport._resolved_legacy_only = value
+            transport = transport._era_source
 
     def _start_using(self, transport: ClientTransport) -> None:
         """Record a successful connection through `transport`."""
@@ -276,10 +299,10 @@ class MCPConfigTransport(ClientTransport):
                     "legacy",
                     transport_options=transport_options,
                 )
-                self._resolved_legacy_only = True
+                self._set_resolved_legacy_only(True)
             else:
-                self._resolved_legacy_only = requested_mode == "legacy" or all(
-                    legacy_backends
+                self._set_resolved_legacy_only(
+                    requested_mode == "legacy" or all(legacy_backends)
                 )
 
             async with FastMCPTransport(mcp=composite).connect_session(
@@ -295,7 +318,7 @@ class MCPConfigTransport(ClientTransport):
                         self._stop_using(backend)
         finally:
             await stack.aclose()
-            self._resolved_legacy_only = False
+            self._set_resolved_legacy_only(False)
 
     async def _build_composite(
         self,
