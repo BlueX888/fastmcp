@@ -395,13 +395,22 @@ class RequestDirector:
             serialized[key] = value
         return serialized
 
-    def _encode_path_component(self, param_name: str, value: Any) -> str:
+    def _encode_path_component(
+        self,
+        param_name: str,
+        value: Any,
+        *,
+        openapi_scalar: bool = False,
+    ) -> str:
         """Reject traversal in a single path value and percent-encode it.
 
         Dots are encoded as well so the resulting segment cannot be read as a
-        ``.`` or ``..`` path segment during URL normalization.
+        ``.`` or ``..`` path segment during URL normalization. Styled values
+        use the OpenAPI scalar convention (booleans become ``true``/``false``);
+        the default ``simple`` path keeps its historical ``str()`` behavior.
         """
-        decoded = str(value)
+        text = _query_scalar_to_str(value) if openapi_scalar else str(value)
+        decoded = text
         for _ in range(_MAX_PATH_DECODINGS):
             if any(
                 part in {".", ".."} for part in decoded.replace("\\", "/").split("/")
@@ -417,7 +426,7 @@ class RequestDirector:
             raise ValueError(
                 f"Path parameter '{param_name}' has too many encoding layers"
             )
-        return quote(str(value), safe="").replace(".", "%2E")
+        return quote(text, safe="").replace(".", "%2E")
 
     def _serialize_path_parameter(
         self,
@@ -435,11 +444,11 @@ class RequestDirector:
         including explode variants.
         """
 
-        def encode(item: Any) -> str:
-            return self._encode_path_component(param_name, item)
-
         if style not in {"label", "matrix"}:
-            return encode(value)
+            return self._encode_path_component(param_name, value)
+
+        def encode(item: Any) -> str:
+            return self._encode_path_component(param_name, item, openapi_scalar=True)
 
         # Structural characters (".", "," and ";name=") are emitted literally;
         # each value component is encoded independently.
@@ -524,6 +533,14 @@ class RequestDirector:
                     param_name, param_value, style, explode
                 )
                 url_path = url_path.replace(placeholder, safe_value)
+
+        # Individually safe values can compose an unsafe segment: label style
+        # prefixes "." and joins components with ".", so empty values next to
+        # each other (or next to template dots) produce "." or "..". httpx
+        # normalizes those away, silently retargeting the request. Validate the
+        # fully substituted template to catch such compositions.
+        if any(part in {".", ".."} for part in url_path.split("/")):
+            raise ValueError("Path parameters cannot compose dot segments")
 
         # Combine with base URL. Plain concatenation: urljoin would read a
         # leading "name:" segment (e.g. "/job-1:cancel") as a URL scheme.

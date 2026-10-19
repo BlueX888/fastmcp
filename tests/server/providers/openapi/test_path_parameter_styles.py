@@ -28,6 +28,7 @@ async def _capture_request(
     paths: dict[str, dict[str, Any]],
     tool_name: str,
     arguments: dict[str, Any],
+    base_url: str = "https://example.test",
 ) -> httpx2.Request:
     requests: list[httpx2.Request] = []
 
@@ -36,7 +37,7 @@ async def _capture_request(
         return httpx2.Response(200, json={"ok": True})
 
     async with httpx2.AsyncClient(
-        base_url="https://example.test", transport=httpx2.MockTransport(capture)
+        base_url=base_url, transport=httpx2.MockTransport(capture)
     ) as http_client:
         server = FastMCP.from_openapi(openapi_spec=_spec(paths), client=http_client)
         async with Client(server) as client:
@@ -173,3 +174,140 @@ async def test_styled_path_parameter_still_rejects_dot_segments(style: str) -> N
             "get_item",
             {"id": ".."},
         )
+
+
+def _parameter(
+    name: str,
+    style: str,
+    schema: dict[str, Any],
+    explode: bool | None = None,
+) -> dict[str, Any]:
+    parameter = {
+        "name": name,
+        "in": "path",
+        "required": True,
+        "style": style,
+        "schema": schema,
+    }
+    if explode is not None:
+        parameter["explode"] = explode
+    return parameter
+
+
+_ARRAY_OF_STRINGS = {"type": "array", "items": {"type": "string"}}
+_STRING = {"type": "string"}
+
+
+async def _assert_request_rejected(
+    paths: dict[str, dict[str, Any]],
+    tool_name: str,
+    arguments: dict[str, Any],
+    base_url: str = "https://example.test",
+) -> None:
+    """Assert the request is never sent, failing red as an assertion."""
+    try:
+        request = await _capture_request(paths, tool_name, arguments, base_url)
+    except Exception as exc:
+        assert "dot segments" in str(exc)
+    else:
+        raise AssertionError(
+            f"expected a dot-segment rejection, but request was sent to {request.url}"
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "parameters", "arguments", "base_url"),
+    [
+        # Two empty label array components compose "..".
+        (
+            "/p/{id}",
+            [_parameter("id", "label", _ARRAY_OF_STRINGS, True)],
+            {"id": ["", ""]},
+            "https://example.test",
+        ),
+        # Composed ".." in both segments could escape the base URL's path.
+        (
+            "/r/{x}/{y}",
+            [
+                _parameter("x", "label", _ARRAY_OF_STRINGS, True),
+                _parameter("y", "label", _ARRAY_OF_STRINGS, True),
+            ],
+            {"x": ["", ""], "y": ["", ""]},
+            "https://example.test/root/",
+        ),
+        # Adjacent label scalars compose ".." without any array.
+        (
+            "/adj/{x}{y}",
+            [
+                _parameter("x", "label", _STRING),
+                _parameter("y", "label", _STRING),
+            ],
+            {"x": "", "y": ""},
+            "https://example.test",
+        ),
+        # A template dot after an empty label scalar composes "..".
+        (
+            "/sfx/{x}.",
+            [_parameter("x", "label", _STRING)],
+            {"x": ""},
+            "https://example.test",
+        ),
+        # A lone empty label scalar normalizes "/p/." to "/p"; reject instead
+        # of silently retargeting the request.
+        (
+            "/p/{id}",
+            [_parameter("id", "label", _STRING)],
+            {"id": ""},
+            "https://example.test",
+        ),
+    ],
+)
+async def test_label_dot_compositions_are_rejected(
+    path: str,
+    parameters: list[dict[str, Any]],
+    arguments: dict[str, Any],
+    base_url: str,
+) -> None:
+    """Safe-looking label components must not compose a "." or ".." segment."""
+    spec_paths = {
+        path: {
+            "get": {
+                "operationId": "go",
+                "parameters": parameters,
+                "responses": {"200": {"description": "OK"}},
+            }
+        }
+    }
+
+    await _assert_request_rejected(spec_paths, "go", arguments, base_url)
+
+
+@pytest.mark.parametrize(
+    ("style", "value", "expected_path"),
+    [
+        ("label", True, "/items/.true"),
+        ("label", False, "/items/.false"),
+        ("matrix", True, "/items/;id=true"),
+        ("matrix", False, "/items/;id=false"),
+    ],
+)
+async def test_styled_path_boolean_uses_openapi_scalar_convention(
+    style: str,
+    value: bool,
+    expected_path: str,
+) -> None:
+    """Styled booleans serialize as true/false, matching query parameters."""
+    request = await _capture_request(
+        {
+            "/items/{id}": {
+                "get": _operation(
+                    "get_item",
+                    _parameter("id", style, {"type": "boolean"}),
+                )
+            }
+        },
+        "get_item",
+        {"id": value},
+    )
+
+    assert request.url.path == expected_path
