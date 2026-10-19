@@ -421,6 +421,47 @@ class TestPromptArgumentAliases:
         result = await prompt.render({"Name": "5"})
         assert result.messages == [Message("Hello, 5!")]
 
+    async def test_alias_on_field_default_is_advertised_and_renderable(self):
+        def greet(name: str = Field(alias="Name")) -> str:
+            return f"Hello, {name}!"
+
+        prompt = Prompt.from_function(greet)
+
+        assert prompt.arguments is not None
+        assert [arg.name for arg in prompt.arguments] == ["Name"]
+        assert prompt.arguments[0].required is True
+
+        result = await prompt.render({"Name": "Ada"})
+        assert result.messages == [Message("Hello, Ada!")]
+
+    async def test_alias_on_field_default_with_default_value(self):
+        def greet(name: int = Field(default=7, alias="Name")) -> str:
+            return f"Hello, {name}!"
+
+        prompt = Prompt.from_function(greet)
+
+        assert prompt.arguments is not None
+        assert [arg.name for arg in prompt.arguments] == ["Name"]
+        assert prompt.arguments[0].required is False
+
+        result = await prompt.render({"Name": "9"})
+        assert result.messages == [Message("Hello, 9!")]
+
+        default_result = await prompt.render({})
+        assert default_result.messages == [Message("Hello, 7!")]
+
+    async def test_validation_alias_on_field_default_is_advertised_and_renderable(self):
+        def greet(name: int = Field(default=7, validation_alias="Name")) -> str:
+            return f"Hello, {name}!"
+
+        prompt = Prompt.from_function(greet)
+
+        assert prompt.arguments is not None
+        assert [arg.name for arg in prompt.arguments] == ["Name"]
+
+        result = await prompt.render({"Name": "9"})
+        assert result.messages == [Message("Hello, 9!")]
+
     async def test_aliased_non_string_argument_accepts_json_string(self):
         def total(numbers: Annotated[list[int], Field(alias="Numbers")]) -> str:
             return f"sum={sum(numbers)}"

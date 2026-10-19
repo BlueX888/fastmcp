@@ -77,10 +77,20 @@ def _python_names_by_argument_name(fn: Callable[..., Any]) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for param_name, param in sig.parameters.items():
         annotation = hints.get(param_name, param.annotation)
-        if annotation is inspect.Parameter.empty:
-            continue
+        default = param.default
         try:
-            field_info = FieldInfo.from_annotation(annotation)
+            if isinstance(default, FieldInfo):
+                # A Field(...) default is part of the call schema too. Merge
+                # it with Annotated metadata exactly as pydantic does, so the
+                # alias pydantic advertises is the one we map.
+                if annotation is inspect.Parameter.empty:
+                    field_info = default
+                else:
+                    field_info = FieldInfo.from_annotated_attribute(annotation, default)
+            elif annotation is not inspect.Parameter.empty:
+                field_info = FieldInfo.from_annotation(annotation)
+            else:
+                continue
         except Exception as e:
             logger.debug(
                 "Could not determine alias for prompt argument %s: %s", param_name, e
