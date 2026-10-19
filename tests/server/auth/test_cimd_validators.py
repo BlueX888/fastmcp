@@ -6,6 +6,7 @@ import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from mcp.shared.auth import InvalidScopeError
 from pydantic import AnyHttpUrl
 
 from fastmcp.server.auth.cimd import (
@@ -486,6 +487,116 @@ class TestCIMDClientManagerGetClientOptions:
         client = await manager.get_client(url)
         assert client is not None
         assert client.scope == "custom-scope"
+
+    async def test_doc_scope_outside_valid_scopes_is_not_granted(
+        self, httpx_mock, mock_dns
+    ):
+        """A document-declared scope outside the server's allowlist is unusable."""
+        url = "https://example.com/client.json"
+        doc_data = {
+            "client_id": url,
+            "client_name": "Test App",
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "token_endpoint_auth_method": "none",
+            "scope": "admin",
+        }
+        httpx_mock.add_response(
+            json=doc_data,
+            headers={"content-length": "200"},
+        )
+
+        manager = CIMDClientManager(
+            enable_cimd=True,
+            default_scope="read",
+            valid_scopes=["read"],
+        )
+        client = await manager.get_client(url)
+        assert client is not None
+        # The SDK model reads a placeholder "" as omitted, leaving no allowed scope.
+        assert client.scope is None
+        with pytest.raises(InvalidScopeError):
+            client.validate_scope("admin")
+
+    async def test_doc_scope_is_intersected_with_valid_scopes(
+        self, httpx_mock, mock_dns
+    ):
+        """Only the allowlisted portion of a document scope is granted."""
+        url = "https://example.com/client.json"
+        doc_data = {
+            "client_id": url,
+            "client_name": "Test App",
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "token_endpoint_auth_method": "none",
+            "scope": "read admin",
+        }
+        httpx_mock.add_response(
+            json=doc_data,
+            headers={"content-length": "200"},
+        )
+
+        manager = CIMDClientManager(
+            enable_cimd=True,
+            default_scope="read",
+            valid_scopes=["read", "write"],
+        )
+        client = await manager.get_client(url)
+        assert client is not None
+        assert client.scope == "read"
+        assert client.validate_scope("read") == ["read"]
+        with pytest.raises(InvalidScopeError):
+            client.validate_scope("admin")
+
+    async def test_doc_scope_within_valid_scopes_is_preserved(
+        self, httpx_mock, mock_dns
+    ):
+        """A document scope that is fully allowlisted keeps working."""
+        url = "https://example.com/client.json"
+        doc_data = {
+            "client_id": url,
+            "client_name": "Test App",
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "token_endpoint_auth_method": "none",
+            "scope": "read",
+        }
+        httpx_mock.add_response(
+            json=doc_data,
+            headers={"content-length": "200"},
+        )
+
+        manager = CIMDClientManager(
+            enable_cimd=True,
+            default_scope="read",
+            valid_scopes=["read", "write"],
+        )
+        client = await manager.get_client(url)
+        assert client is not None
+        assert client.scope == "read"
+        assert client.validate_scope("read") == ["read"]
+
+    async def test_default_scope_used_when_doc_omits_scope_with_valid_scopes(
+        self, httpx_mock, mock_dns
+    ):
+        """When the document omits scope, the manager's default is unchanged."""
+        url = "https://example.com/client.json"
+        doc_data = {
+            "client_id": url,
+            "client_name": "Test App",
+            "redirect_uris": ["http://localhost:3000/callback"],
+            "token_endpoint_auth_method": "none",
+        }
+        httpx_mock.add_response(
+            json=doc_data,
+            headers={"content-length": "200"},
+        )
+
+        manager = CIMDClientManager(
+            enable_cimd=True,
+            default_scope="read write",
+            valid_scopes=["read", "write"],
+        )
+        client = await manager.get_client(url)
+        assert client is not None
+        assert client.scope == "read write"
 
     async def test_allowed_redirect_uri_patterns_stored_on_client(
         self, httpx_mock, mock_dns

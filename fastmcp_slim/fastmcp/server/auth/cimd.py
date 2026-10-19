@@ -717,6 +717,7 @@ class CIMDClientManager:
         self,
         enable_cimd: bool = True,
         default_scope: str = "",
+        valid_scopes: list[str] | None = None,
         allowed_redirect_uri_patterns: list[str] | None = None,
     ):
         """Initialize CIMD client manager.
@@ -724,10 +725,13 @@ class CIMDClientManager:
         Args:
             enable_cimd: Whether CIMD support is enabled
             default_scope: Default scope for CIMD clients if not specified in document
+            valid_scopes: Scopes the server allows clients to request. When set,
+                document-declared scopes are intersected with this allowlist.
             allowed_redirect_uri_patterns: Allowed redirect URI patterns (proxy's config)
         """
         self.enabled = enable_cimd
         self.default_scope = default_scope
+        self.valid_scopes = valid_scopes
         self.allowed_redirect_uri_patterns = allowed_redirect_uri_patterns
 
         self._fetcher = CIMDFetcher()
@@ -771,6 +775,19 @@ class CIMDClientManager:
         from fastmcp.server.auth.oauth_proxy.models import ProxyDCRClient
 
         # Create synthetic client from CIMD document.
+        # The document is client-controlled, so its declared scope must not
+        # widen the server's allowlist: only grant scopes that are also in
+        # valid_scopes. A deliberately out-of-policy scope then fails the SDK
+        # scope gate instead of being forwarded upstream. When the document
+        # omits scope, fall back to the manager's default unchanged.
+        if cimd_doc.scope:
+            scope = cimd_doc.scope
+            if self.valid_scopes is not None:
+                allowed = set(self.valid_scopes)
+                scope = " ".join(s for s in scope.split(" ") if s and s in allowed)
+        else:
+            scope = self.default_scope
+
         # Keep CIMD redirect_uris as strings on the document itself so wildcard
         # patterns like http://localhost:*/callback remain valid.
         redirect_uris = None
@@ -779,7 +796,7 @@ class CIMDClientManager:
             client_secret=None,
             redirect_uris=redirect_uris,
             grant_types=cimd_doc.grant_types,
-            scope=cimd_doc.scope or self.default_scope,
+            scope=scope,
             token_endpoint_auth_method=cimd_doc.token_endpoint_auth_method,
             allowed_redirect_uri_patterns=self.allowed_redirect_uri_patterns,
             client_name=cimd_doc.client_name,
