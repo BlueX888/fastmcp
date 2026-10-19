@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from mcp_types import TextResourceContents
+from mcp_types import BlobResourceContents, TextResourceContents
 from pydantic import AnyUrl
 
 from fastmcp import Client, FastMCP
@@ -392,6 +392,100 @@ This is my skill content.
         async with Client(mcp) as client:
             result = await client.read_resource(AnyUrl("skill://my-skill/reference.md"))
             assert "# Reference" in result[0].text
+
+    @pytest.fixture
+    def mime_skill_dir(self, tmp_path: Path) -> Path:
+        """Skill with text, JSON, and unknown-extension supporting files."""
+        skill_dir = tmp_path / "mime-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("# Skill\n")
+        (skill_dir / "reference.md").write_text("# Reference\n")
+        (skill_dir / "data.json").write_text('{"answer": 42}')
+        (skill_dir / "payload.zzz").write_bytes(b"\x00\x01binary")
+        return skill_dir
+
+    @pytest.mark.parametrize(
+        ("filename", "expected_mime", "expects_text"),
+        [
+            ("reference.md", "text/markdown", True),
+            ("data.json", "application/json", False),
+            ("payload.zzz", "application/octet-stream", False),
+        ],
+    )
+    async def test_supporting_file_mime_matches_across_modes(
+        self,
+        mime_skill_dir: Path,
+        filename: str,
+        expected_mime: str,
+        expects_text: bool,
+    ):
+        """The guessed per-file MIME survives both exposure modes.
+
+        Template mode used to discard the guessed MIME and fall back to the
+        template's advertised application/octet-stream, unlike resources mode.
+        """
+        observed: dict[str, tuple[str | None, bool]] = {}
+        for mode in ("template", "resources"):
+            mcp = FastMCP("Test")
+            mcp.add_provider(
+                SkillProvider(skill_path=mime_skill_dir, supporting_files=mode)
+            )
+
+            async with Client(mcp) as client:
+                result = await client.read_resource(
+                    AnyUrl(f"skill://mime-skill/{filename}")
+                )
+
+            assert len(result) == 1
+            item = result[0]
+            observed[mode] = (
+                item.mime_type,
+                isinstance(item, TextResourceContents),
+            )
+            assert item.mime_type == expected_mime
+            if expects_text:
+                assert isinstance(item, TextResourceContents)
+            else:
+                assert isinstance(item, BlobResourceContents)
+
+        assert (
+            observed["template"]
+            == observed["resources"]
+            == (
+                expected_mime,
+                expects_text,
+            )
+        )
+
+    async def test_listing_unchanged_by_supporting_file_mime(
+        self, mime_skill_dir: Path
+    ):
+        """MIME preservation must not alter resource/template listings."""
+        template_provider = SkillProvider(skill_path=mime_skill_dir)
+        template_resources = await template_provider.list_resources()
+        template_templates = await template_provider.list_resource_templates()
+
+        assert [r.name for r in template_resources] == [
+            "mime-skill/SKILL.md",
+            "mime-skill/_manifest",
+        ]
+        assert [t.uri_template for t in template_templates] == [
+            "skill://mime-skill/{path*}"
+        ]
+
+        resources_provider = SkillProvider(
+            skill_path=mime_skill_dir, supporting_files="resources"
+        )
+        resources = await resources_provider.list_resources()
+
+        assert [r.name for r in resources] == [
+            "mime-skill/SKILL.md",
+            "mime-skill/_manifest",
+            "mime-skill/data.json",
+            "mime-skill/payload.zzz",
+            "mime-skill/reference.md",
+        ]
+        assert await resources_provider.list_resource_templates() == []
 
     async def test_read_supporting_file_with_space_in_name(self, tmp_path: Path):
         """Percent-encoded resource URIs for supporting files must round-trip (#4545)."""

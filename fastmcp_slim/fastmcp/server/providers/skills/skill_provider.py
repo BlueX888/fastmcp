@@ -12,7 +12,7 @@ from urllib.parse import quote, unquote
 from mcp.shared.path_security import PathEscapeError
 from pydantic import AnyUrl
 
-from fastmcp.resources.base import Resource, ResourceResult
+from fastmcp.resources.base import Resource, ResourceContent, ResourceResult
 from fastmcp.resources.template import ResourceTemplate
 from fastmcp.server.providers.base import Provider
 from fastmcp.server.providers.skills._common import (
@@ -77,6 +77,12 @@ class SkillFileTemplate(ResourceTemplate):
 
     skill_info: SkillInfo
 
+    @staticmethod
+    def _guess_mime_type(file_path: str | Path) -> str:
+        """Guess a file's MIME type, defaulting to octet-stream."""
+        mime_type, _ = mimetypes.guess_type(str(file_path))
+        return mime_type or "application/octet-stream"
+
     async def read(self, arguments: dict[str, Any]) -> str | bytes | ResourceResult:
         """Read a file from the skill directory."""
         file_path = arguments.get("path", "")
@@ -95,8 +101,7 @@ class SkillFileTemplate(ResourceTemplate):
             raise ValueError(f"Not a file: {file_path}")
 
         # Determine if binary or text based on mime type
-        mime_type, _ = mimetypes.guess_type(str(full_path))
-        if mime_type and mime_type.startswith("text/"):
+        if self._guess_mime_type(full_path).startswith("text/"):
             return full_path.read_text(encoding="utf-8")
         else:
             return full_path.read_bytes()
@@ -107,9 +112,20 @@ class SkillFileTemplate(ResourceTemplate):
         params: dict[str, Any],
     ) -> ResourceResult:
         """Server entry point - read file directly without creating ephemeral resource."""
-        # Call read() directly and convert to ResourceResult
+        # Call read() directly and wrap the result ourselves. convert_result()
+        # would stamp the template's advertised application/octet-stream onto
+        # the content, discarding the per-file MIME guessed here.
         result = await self.read(arguments=params)
-        return self.convert_result(result)
+        if isinstance(result, ResourceResult):
+            return result
+        return ResourceResult(
+            [
+                ResourceContent(
+                    result,
+                    mime_type=self._guess_mime_type(params.get("path", "")),
+                )
+            ]
+        )
 
     async def create_resource(self, uri: str, params: dict[str, Any]) -> Resource:
         """Create a resource for the given URI and parameters.
