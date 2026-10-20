@@ -270,7 +270,7 @@ def _get_auth_context() -> tuple[bool, Any]:
     return (False, get_access_token())
 
 
-C = TypeVar("C", bound=FastMCPComponent)
+C = TypeVar("C", Tool, Resource, ResourceTemplate, Prompt)
 
 
 async def _resolve_listed_candidates(
@@ -996,7 +996,11 @@ class FastMCP(
             tools = await apply_session_transforms([tool])
             # Transforms can change what `auth` sees (a tag, for one), so the
             # check made on the pre-transform component is not enough.
-            if tools and is_enabled(tools[0]) and await _component_auth_allows(tools[0]):
+            if (
+                tools
+                and is_enabled(tools[0])
+                and await _component_auth_allows(tools[0])
+            ):
                 return tools[0]
 
             # The highest version is disabled. If an exact version was
