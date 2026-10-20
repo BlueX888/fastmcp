@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import inspect
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -11,6 +10,7 @@ from typing import Annotated, Any, Literal, cast
 import mcp_types
 from mcp_types import ToolAnnotations
 from pydantic import ConfigDict
+from pydantic import ValidationError as PydanticValidationError
 from pydantic.fields import Field
 from pydantic.functional_validators import BeforeValidator
 from pydantic.json_schema import SkipJsonSchema
@@ -21,7 +21,7 @@ from fastmcp.tools.base import (
     ToolResult,
 )
 from fastmcp.tools.function_parsing import ParsedFunction, _is_object_schema
-from fastmcp.tools.function_tool import FunctionTool, _materialize_sync_generator
+from fastmcp.tools.function_tool import FunctionTool, _ToolBodyError, _wrap_body_errors
 from fastmcp.utilities.async_utils import (
     call_sync_fn_in_threadpool,
     is_coroutine_function,
@@ -285,24 +285,6 @@ def _apply_meta_override(
     return merged
 
 
-def _wrap_materialize_generators(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Wrap ``fn`` so a sync generator it returns is consumed inside the call.
-
-    A generator body runs during iteration, not creation: materializing it
-    within this wrapper keeps the body — and any blocking work it does — under
-    the same invocation and worker thread that created it, instead of stalling
-    the event loop after the call returns. This mirrors how ``FunctionTool``
-    consumes generator tool bodies via ``_wrap_body_errors(...,
-    materialize_generators=True)`` before dispatching to the threadpool.
-    """
-
-    @functools.wraps(fn)
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        return _materialize_sync_generator(fn(*args, **kwargs))
-
-    return wrapper
-
-
 class TransformedTool(Tool):
     """A tool that is transformed from another tool.
 
@@ -381,25 +363,18 @@ class TransformedTool(Tool):
         try:
             from fastmcp.server.dependencies import without_injected_parameters
 
-            fn = without_injected_parameters(self.fn)
-            if is_coroutine_function(fn):
-                result = await fn(**arguments)
-            else:
-                # A sync generator's body runs during iteration, not creation.
-                # Consume it inside the same threadpool call that created it,
-                # so a blocking body stalls a worker thread instead of the
-                # event loop.
-                result = await call_sync_fn_in_threadpool(
-                    _wrap_materialize_generators(fn), **arguments
-                )
-                if inspect.isawaitable(result):
-                    result = await result
-            # Async generators may await between items, so they cannot be
-            # consumed inside the sync worker wrapper above: materialize them
-            # here on the event loop — still inside this invocation so its
-            # yielded values become the result while _current_tool is still
-            # set for forward()/forward_raw().
-            result = await FunctionTool._materialize_generator(result)
+            body_fn = _wrap_body_errors(self.fn, materialize_generators=True)
+            fn = without_injected_parameters(body_fn)
+            try:
+                if is_coroutine_function(fn):
+                    result = await fn(**arguments)
+                else:
+                    result = await call_sync_fn_in_threadpool(fn, **arguments)
+                    if inspect.isawaitable(result):
+                        result = await result
+                result = await FunctionTool._materialize_generator(result)
+            except PydanticValidationError as exc:
+                raise _ToolBodyError(str(exc)) from exc
 
             # A multi-round-trip ask (SEP-2322) is not output data: it must
             # reach the wire handler intact, never reshaped by output_schema
@@ -649,6 +624,7 @@ class TransformedTool(Tool):
             version=final_version,
             title=final_title,
             description=final_description,
+            icons=tool.icons,
             parameters=final_schema,
             output_schema=final_output_schema,
             tags=tags or tool.tags,
