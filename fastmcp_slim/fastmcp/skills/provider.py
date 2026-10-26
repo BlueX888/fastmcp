@@ -7,7 +7,7 @@ import json
 import mimetypes
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, unquote
 
 import anyio
@@ -22,6 +22,9 @@ from fastmcp.skills.models import MCPSkill
 from fastmcp.skills.skill import Skill, _validate_relative_path
 from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.versions import VersionSpec
+
+if TYPE_CHECKING:
+    from fastmcp.server.extensions import ServerExtension
 
 logger = get_logger(__name__)
 
@@ -73,8 +76,8 @@ class SkillCatalogProvider(Provider):
     Each skill's files are served under `skill://{path}/`, where `path` defaults
     to the skill's name. Pass a mapping to choose paths; the last path segment
     must equal the skill's name. Every client can read the files as resources,
-    and the provider can be passed to `SkillsExtension` for `skills/list` and
-    `skills/get` discovery.
+    and the provider registers `SkillsExtension` so discovery clients can use
+    `skills/list` and `skills/get`.
 
     For skills that change at runtime, such as rows in a database, subclass and
     override `load_skills()`. It is called once per MCP request.
@@ -84,7 +87,6 @@ class SkillCatalogProvider(Provider):
         from fastmcp import FastMCP
         from fastmcp.skills.provider import SkillCatalogProvider
         from fastmcp.skills import Skill
-        from fastmcp.skills.extension import SkillsExtension
 
         review = Skill(
             name="code-review",
@@ -95,13 +97,17 @@ class SkillCatalogProvider(Provider):
         mcp = FastMCP("Skills")
         skills = SkillCatalogProvider([review, Skill.from_directory("./skills/deploy")])
         mcp.add_provider(skills)
-        mcp.add_extension(SkillsExtension(providers=[skills]))
         ```
     """
 
     def __init__(self, skills: SkillCatalog | None = None) -> None:
         super().__init__()
         self._static = _normalize(skills or ())
+
+    def required_extensions(self) -> Sequence[ServerExtension]:
+        from fastmcp.skills.extension import SkillsExtension
+
+        return (SkillsExtension(),)
 
     async def load_skills(self) -> SkillCatalog:
         """Return the skills to serve. Override to load them from another source."""
