@@ -113,7 +113,9 @@ from fastmcp.utilities.logging import get_logger
 from fastmcp.utilities.tasks import TaskConfig
 from fastmcp.utilities.types import AnyFunction, FastMCPBaseModel, NotSet, NotSetT
 from fastmcp.utilities.versions import (
+    VersionKey,
     VersionSpec,
+    parse_version_key,
     version_sort_key,
 )
 
@@ -272,6 +274,14 @@ def _get_auth_context() -> tuple[bool, Any]:
 
 C = TypeVar("C", Tool, Resource, ResourceTemplate, Prompt)
 
+# An exact spec that matches unversioned components and no versioned one:
+# `VersionSpec.matches()` accepts `version=None` for every spec, while
+# "__impossible__" never normalizes equal to a real version. This lets the
+# fallback ask the normal lookup path about an unversioned candidate exactly
+# as it asks about a versioned one. `VersionSpec.intersect()` already uses the
+# same sentinel for an unsatisfiable spec.
+_UNVERSIONED_SPEC = VersionSpec(eq="__impossible__")
+
 
 async def _resolve_listed_candidates(
     candidates: Sequence[C],
@@ -285,6 +295,14 @@ async def _resolve_listed_candidates(
     still listed. Re-resolve each candidate version, highest first, through
     the same ``get_*`` path a caller would use, so those refusals are honored.
 
+    Candidates are grouped by PEP 440-normalized version because the lookup
+    path accepts a version, not a spelling: ``eq`` matches ``"1"`` and
+    ``"1.0"`` alike, and duplicate same-version components from different
+    providers are indistinguishable by name and version. A refused group is
+    skipped. Within a resolvable group the highest enabled and authorized
+    component is chosen, so a disabled sibling cannot shadow an enabled one
+    the lookup happens to return.
+
     Args:
         candidates: Listed components to consider.
         lookup: Performs a get for one version spec.
@@ -293,13 +311,23 @@ async def _resolve_listed_candidates(
     Returns:
         The highest enabled and authorized resolved component, or None.
     """
-    seen: set[str | None] = set()
-    for candidate in sorted(candidates, key=version_sort_key, reverse=True):
-        if candidate.version in seen:
-            continue
-        seen.add(candidate.version)
+    groups: list[tuple[VersionKey, list[C]]] = []
+    ordered = cast("list[C]", sorted(candidates, key=version_sort_key, reverse=True))
+    for candidate in ordered:
+        version_key = parse_version_key(candidate.version)
+        for known_key, group in groups:
+            if known_key == version_key:
+                group.append(candidate)
+                break
+        else:
+            groups.append((version_key, [candidate]))
+
+    for version_key, group in groups:
+        first = group[0]
         spec = (
-            VersionSpec(eq=candidate.version) if candidate.version is not None else None
+            VersionSpec(eq=first.version)
+            if first.version is not None
+            else _UNVERSIONED_SPEC
         )
         try:
             resolved = await lookup(spec)
@@ -307,19 +335,23 @@ async def _resolve_listed_candidates(
             # A lookup-time auth refusal declines this version; a lower
             # version within the range may still be authorized.
             continue
-        if resolved is None or resolved.version != candidate.version:
+        if resolved is None or not matches(resolved):
             continue
-        if not matches(resolved):
+        if parse_version_key(resolved.version) != version_key:
             continue
-        resolved_items = await apply_session_transforms([resolved])
-        # Transforms can change what `auth` sees (a tag, for one), so the
-        # check made on the pre-transform component is not enough.
-        if (
-            resolved_items
-            and is_enabled(resolved_items[0])
-            and await _component_auth_allows(resolved_items[0])
-        ):
-            return resolved_items[0]
+        # The lookup path admits this version. Prefer its component, then the
+        # listed components of the same normalized version that it cannot
+        # distinguish from it.
+        for item in (resolved, *(c for c in group if matches(c))):
+            resolved_items = await apply_session_transforms([item])
+            # Transforms can change what `auth` sees (a tag, for one), so the
+            # check made on the pre-transform component is not enough.
+            if (
+                resolved_items
+                and is_enabled(resolved_items[0])
+                and await _component_auth_allows(resolved_items[0])
+            ):
+                return resolved_items[0]
     return None
 
 
