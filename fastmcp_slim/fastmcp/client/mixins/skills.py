@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from typing import TYPE_CHECKING, cast
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import mcp_types
 from mcp.client.caching import CacheMode
+from mcp.shared.exceptions import MCPError
+from mcp_types import INVALID_PARAMS, METHOD_NOT_FOUND
 from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from fastmcp.client.telemetry import client_span
@@ -20,14 +24,15 @@ from fastmcp.skills.models import (
     ListSkillsRequest,
     ListSkillsResult,
     MCPSkill,
+    SkillResource,
     _parse_resource_uri,
 )
+from fastmcp.skills.skill import Skill, _validate_relative_path
 from fastmcp.telemetry import inject_trace_context
 from fastmcp.utilities.logging import get_logger
 
 if TYPE_CHECKING:
     from fastmcp.client.client import Client
-    from fastmcp.skills.skill import Skill
 
 logger = get_logger(__name__)
 
@@ -224,48 +229,120 @@ class ClientSkillsMixin:
         result = await self.get_skill_mcp(uri, cache_mode=cache_mode)
         return result.skill
 
-    async def read_skill(self: Client, uri: str) -> Skill:
-        """Fetch a whole skill and return it as a `Skill`.
+    async def read_skill(
+        self: Client,
+        uri: str,
+        *,
+        cache_mode: CacheMode = "use",
+    ) -> Skill:
+        """Fetch every file of a skill, verify each one, and return a `Skill`.
 
-        Gets the skill's entry, reads every file in its manifest, and checks
-        each file's size and digest before building the `Skill`. The result
-        can be saved, inspected, or served again from another server with
-        `SkillCatalogProvider`.
+        The manifest comes from `skills/get` when the Skills extension was
+        negotiated, and otherwise from the `_manifest` resource that FastMCP
+        skill providers serve next to the files. Every file must match the
+        size and SHA-256 digest the manifest promised.
 
         Args:
             uri: URI of the skill's `SKILL.md` resource.
+            cache_mode: Response-cache behavior for the `skills/get` request.
 
         Returns:
-            The skill, with every file's exact bytes.
+            The skill, with the exact bytes of every file.
 
         Raises:
-            RuntimeError: If the client is disconnected or Skills was not negotiated.
-            ValueError: If the skill has no static manifest, or a file's bytes
-                don't match the manifest.
+            RuntimeError: If the client is disconnected.
+            ValueError: If the manifest is unusable, a file does not match it,
+                or the files do not form a valid skill.
             MCPError: If the server rejects a request.
         """
-        from fastmcp.skills.skill import Skill
-
-        entry = await self.get_skill(uri)
-        if entry.resources == "dynamic":
-            raise ValueError(f"Skill {uri!r} has no static manifest to read")
-
-        root_depth = len(_parse_resource_uri(entry.uri)[2]) - 1
+        _, authority, segments = _parse_resource_uri(uri)
+        if not segments or segments[-1] != "SKILL.md":
+            raise ValueError(f"read_skill takes a skill's SKILL.md URI, got {uri!r}")
+        manifest = await self._skill_manifest(uri, cache_mode)
+        for path in manifest:
+            _validate_relative_path(path)
         files: dict[str, bytes] = {}
-        for record in entry.resources:
-            contents = await self.read_resource(record.uri)
-            if len(contents) != 1:
-                raise ValueError(f"Skill file {record.uri!r} did not return one file")
-            content = contents[0]
-            if isinstance(content, mcp_types.TextResourceContents):
-                data = content.text.encode()
-            else:
-                data = base64.b64decode(content.blob)
-            digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
-            if len(data) != record.size or digest != record.digest:
+        for path, record in manifest.items():
+            content = await self._read_skill_file(record.uri)
+            if len(content) != record.size:
                 raise ValueError(
-                    f"Skill file {record.uri!r} does not match its manifest digest"
+                    f"Skill file {path!r} is {len(content)} bytes; "
+                    f"the manifest promised {record.size}"
                 )
-            relative = "/".join(_parse_resource_uri(record.uri)[2][root_depth:])
-            files[relative] = data
-        return Skill.from_files(files)
+            actual = f"sha256:{hashlib.sha256(content).hexdigest()}"
+            if actual != record.digest:
+                raise ValueError(
+                    f"Skill file {path!r} does not match its manifest digest"
+                )
+            files[path] = content
+        skill = Skill.from_files(files)
+        expected = segments[-2] if len(segments) > 1 else unquote(authority)
+        if skill.name != expected:
+            raise ValueError(
+                f"Skill at {uri!r} is named {skill.name!r} in its SKILL.md"
+            )
+        return skill
+
+    async def _skill_manifest(
+        self: Client, uri: str, cache_mode: CacheMode
+    ) -> dict[str, SkillResource]:
+        """Relative path -> manifest record for every file in the skill.
+
+        A skill the server serves as resources but does not advertise through
+        the extension, such as one behind a proxy, still has a `_manifest`.
+        """
+        if self._skills_unavailable_reason() is None:
+            try:
+                entry = await self.get_skill(uri, cache_mode=cache_mode)
+            except MCPError as exc:
+                if exc.error.code not in (INVALID_PARAMS, METHOD_NOT_FOUND):
+                    raise
+                entry = None
+            if entry is not None and entry.resources == "dynamic":
+                raise ValueError(f"Skill {uri!r} has no static manifest to read")
+            if entry is not None and isinstance(entry.resources, list):
+                root_depth = len(_parse_resource_uri(entry.uri)[2]) - 1
+                manifest: dict[str, SkillResource] = {}
+                for resource in entry.resources:
+                    path = "/".join(_parse_resource_uri(resource.uri)[2][root_depth:])
+                    if path in manifest:
+                        raise ValueError(f"Duplicate skill file path: {path!r}")
+                    manifest[path] = resource
+                return manifest
+        return await self._resource_mode_manifest(uri)
+
+    async def _resource_mode_manifest(
+        self: Client, uri: str
+    ) -> dict[str, SkillResource]:
+        parsed = urlsplit(uri)
+        prefix = parsed.path[: -len("SKILL.md")]
+        manifest_uri = urlunsplit(parsed._replace(path=f"{prefix}_manifest"))
+        try:
+            text = (await self._read_skill_file(manifest_uri)).decode("utf-8")
+            data = json.loads(text)
+            files = {
+                entry["path"]: SkillResource(
+                    uri=urlunsplit(
+                        parsed._replace(path=prefix + quote(entry["path"], safe="/"))
+                    ),
+                    digest=entry["hash"],
+                    size=entry["size"],
+                )
+                for entry in data["files"]
+            }
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ValueError(f"Invalid skill manifest at {manifest_uri}") from exc
+        if not files:
+            raise ValueError(f"Skill manifest at {manifest_uri} lists no files")
+        return files
+
+    async def _read_skill_file(self: Client, uri: str) -> bytes:
+        contents = await self.read_resource(uri)
+        if len(contents) != 1:
+            raise ValueError(
+                f"Expected one content block for {uri}, got {len(contents)}"
+            )
+        (content,) = contents
+        if isinstance(content, mcp_types.TextResourceContents):
+            return content.text.encode("utf-8")
+        return base64.b64decode(content.blob)

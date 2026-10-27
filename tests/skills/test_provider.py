@@ -5,9 +5,11 @@ import hashlib
 import json
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
+from mcp.server.context import ServerRequestContext
 from mcp.shared.exceptions import MCPError
 from mcp_types import BlobResourceContents, TextResourceContents
 
@@ -16,6 +18,7 @@ from fastmcp.server.middleware import Middleware
 from fastmcp.server.middleware.authorization import AuthMiddleware
 from fastmcp.skills import Skill, SkillsClientExtension
 from fastmcp.skills.extension import SkillsExtension
+from fastmcp.skills.models import MCPSkill
 from fastmcp.skills.provider import SkillCatalogProvider
 from fastmcp.utilities.skills import list_skill_summaries, sync_skills
 
@@ -214,22 +217,19 @@ async def test_read_skill_can_be_served_again():
 
 
 async def test_read_skill_rejects_bytes_that_miss_the_manifest():
-    provider = SkillCatalogProvider([REVIEW])
+    class PublishedManifest(SkillCatalogProvider):
+        async def _get_skill_entry(
+            self, uri: str, context: ServerRequestContext[Any, Any]
+        ) -> MCPSkill | None:
+            return REVIEW.to_mcp_skill()
+
+    provider = PublishedManifest([REVIEW])
     server = serve(provider)
 
     @server.resource("skill://review/notes.md")
     def tampered() -> str:
-        return "tampered\n"
+        return "tampered!\n"
 
     async with skills_client(server) as client:
-        entry = REVIEW.to_mcp_skill()
-        client.get_skill = _returning(entry)  # type: ignore[method-assign]
         with pytest.raises(ValueError, match="does not match its manifest"):
-            await client.read_skill(entry.uri)
-
-
-def _returning(entry: object):
-    async def get_skill(uri: str, **kwargs: object) -> object:
-        return entry
-
-    return get_skill
+            await client.read_skill("skill://review/SKILL.md")
