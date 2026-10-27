@@ -80,6 +80,10 @@ or supersession. See [maintenance history](docs/fastmcp-maintenance-history.md) 
 [architecture decisions](docs/agentic-stack-architecture.md).
 
 Existing-contribution assessments dispatch to `cloud-contribution-verification`.
+Assessment selects at most three candidates in `verification_prs`, independently
+of the complete PR history supplied for review. Historical discovery does not
+schedule every unmerged PR for execution. An empty selection retains a review
+decision and explicitly records that no tests ran.
 An unmerged contribution can be verified while closed, including assignment-gated
 PRs; verification does not reopen it. Its current diff and changes since review
 are supplied to assessment just as for an open contribution. Merged contributions
@@ -87,12 +91,20 @@ remain in the history assessment without launching verification of their old hea
 The verifier fetches immutable commits, derives changed test modules from their
 merge base, and runs them on both the pinned current release target and proposed
 head. Optional independent
-probes run on both as well. Neighboring test modules run on the head. The repository
+probes run on both as well. Immediate sibling test modules run on the head as
+explicit file paths; verification never expands a parent directory into the full
+suite. More than twenty sibling modules are omitted with a recorded limitation.
+An omitted adjacent stage is `not_run`, not a duplicated passing head result. The repository
 lockfile is installed without re-resolution; JUnit cases distinguish assertion
-failures, setup errors, skips and missing tests. Test processes receive a separate
-home and an explicit environment without controller credentials; this is not an
-operating-system sandbox. Each command has a timeout that terminates its process
-group.
+failures, setup errors, skips and missing tests. The managed supervisor launches
+verification as UID/GID 65534 with no supplementary groups, capabilities, or
+inherited credentials, and with privilege escalation disabled. The supervisor's
+runner and input files remain root-owned; verification has its own home and
+scratch directory. A network-disabled container canary checks access to a dummy
+supervisor environment and private file. Linux, a root supervisor, and `setpriv`
+are required; an unavailable boundary fails closed. This isolates supervisor
+credentials, not all networking or world-readable files. Command process groups
+have timeouts; the managed container deadline is the final lifetime bound.
 
 Results retain the source revisions, probe source, commands, exit codes and test
 transitions. The controller checks deployment version and exact inputs before
@@ -140,6 +152,9 @@ Intake resolves references and discards closed issues and references to other PR
 Events for the same GitHub item are limited to one launch per sixty seconds;
 intake fetches current GitHub state when it starts. Slack announces the issues
 accepted for triage only when their controller starts. Empty intake runs stay quiet.
+Failure alerts follow the intake's terminal outcome once, with issue-specific
+reasons in its state message. Child failures remain in the linked review queue
+and run graph rather than producing separate alerts for every orchestration layer.
 
 Successful receipts defer unchanged issue metadata for sixty minutes by default.
 This is a cooldown, not a claim that associated PR history is unchanged. Full
