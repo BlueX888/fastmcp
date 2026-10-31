@@ -77,9 +77,11 @@ def _python_names_by_argument_name(fn: Callable[..., Any]) -> dict[str, str]:
             )
             continue
 
-        advertised_name = field_info.alias
-        if advertised_name is None and isinstance(field_info.validation_alias, str):
-            advertised_name = field_info.validation_alias
+        advertised_name = (
+            field_info.validation_alias
+            if isinstance(field_info.validation_alias, str)
+            else field_info.alias
+        )
         if advertised_name and advertised_name != param_name:
             mapping[advertised_name] = param_name
     return mapping
