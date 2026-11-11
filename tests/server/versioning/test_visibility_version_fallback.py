@@ -15,6 +15,9 @@ from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
 from mcp_types import TextContent
 
 from fastmcp import FastMCP
+from fastmcp.prompts.base import Prompt
+from fastmcp.resources.base import Resource
+from fastmcp.resources.template import ResourceTemplate
 from fastmcp.server.auth import AccessToken, require_scopes
 from fastmcp.server.providers import Provider
 from fastmcp.tools.base import Tool
@@ -500,11 +503,21 @@ class TestEquivalentVersionSpellings:
 
 
 class _RefusingProvider(Provider):
-    """Lists tools but refuses to resolve any of them by name."""
+    """Lists components but refuses to resolve any of them by lookup."""
 
-    def __init__(self, tools: Sequence[Tool]) -> None:
+    def __init__(
+        self,
+        *,
+        tools: Sequence[Tool] = (),
+        resources: Sequence[Resource] = (),
+        templates: Sequence[ResourceTemplate] = (),
+        prompts: Sequence[Prompt] = (),
+    ) -> None:
         super().__init__()
         self._tools = list(tools)
+        self._resources = list(resources)
+        self._templates = list(templates)
+        self._prompts = list(prompts)
 
     async def _list_tools(self) -> Sequence[Tool]:
         return self._tools
@@ -514,16 +527,59 @@ class _RefusingProvider(Provider):
     ) -> Tool | None:
         return None
 
+    async def _list_resources(self) -> Sequence[Resource]:
+        return self._resources
+
+    async def _get_resource(
+        self, uri: str, version: VersionSpec | None = None
+    ) -> Resource | None:
+        return None
+
+    async def _list_resource_templates(self) -> Sequence[ResourceTemplate]:
+        return self._templates
+
+    async def _get_resource_template(
+        self, uri: str, version: VersionSpec | None = None
+    ) -> ResourceTemplate | None:
+        return None
+
+    async def _list_prompts(self) -> Sequence[Prompt]:
+        return self._prompts
+
+    async def _get_prompt(
+        self, name: str, version: VersionSpec | None = None
+    ) -> Prompt | None:
+        return None
+
 
 class _PlainProvider(Provider):
-    """Lists a fixed set of tools and resolves them normally."""
+    """Lists a fixed set of components and resolves them normally."""
 
-    def __init__(self, tools: Sequence[Tool]) -> None:
+    def __init__(
+        self,
+        *,
+        tools: Sequence[Tool] = (),
+        resources: Sequence[Resource] = (),
+        templates: Sequence[ResourceTemplate] = (),
+        prompts: Sequence[Prompt] = (),
+    ) -> None:
         super().__init__()
         self._tools = list(tools)
+        self._resources = list(resources)
+        self._templates = list(templates)
+        self._prompts = list(prompts)
 
     async def _list_tools(self) -> Sequence[Tool]:
         return self._tools
+
+    async def _list_resources(self) -> Sequence[Resource]:
+        return self._resources
+
+    async def _list_resource_templates(self) -> Sequence[ResourceTemplate]:
+        return self._templates
+
+    async def _list_prompts(self) -> Sequence[Prompt]:
+        return self._prompts
 
 
 class TestProviderLookupAuthority:
@@ -543,10 +599,14 @@ class TestProviderLookupAuthority:
             return "second"
 
         first = _PlainProvider(
-            [Tool.from_function(first_impl, name="calc", version="1.0", tags={"a"})]
+            tools=[
+                Tool.from_function(first_impl, name="calc", version="1.0", tags={"a"})
+            ]
         )
         second = _RefusingProvider(
-            [Tool.from_function(second_impl, name="calc", version="1.0", tags={"b"})]
+            tools=[
+                Tool.from_function(second_impl, name="calc", version="1.0", tags={"b"})
+            ]
         )
         mcp = FastMCP(providers=[first, second])
         mcp.disable(tags={"a"})
@@ -558,3 +618,74 @@ class TestProviderLookupAuthority:
         assert await mcp.get_tool("calc") is None
         with pytest.raises(NotFoundError):
             await mcp.call_tool("calc", {})
+
+    async def test_disabled_duplicate_does_not_expose_refused_same_version_components(
+        self,
+    ):
+        import pytest
+
+        from fastmcp.exceptions import NotFoundError
+
+        def tool_impl() -> str:
+            return "tool"
+
+        def resource_impl() -> str:
+            return "resource"
+
+        def template_impl(id: str) -> str:
+            return id
+
+        def prompt_impl() -> str:
+            return "prompt"
+
+        def components(tag: str) -> dict:
+            return {
+                "tools": [
+                    Tool.from_function(
+                        tool_impl, name="calc", version="1.0", tags={tag}
+                    )
+                ],
+                "resources": [
+                    Resource.from_function(
+                        resource_impl, "data://cfg", version="1.0", tags={tag}
+                    )
+                ],
+                "templates": [
+                    ResourceTemplate.from_function(
+                        template_impl,
+                        "data://items/{id}",
+                        version="1.0",
+                        tags={tag},
+                    )
+                ],
+                "prompts": [
+                    Prompt.from_function(
+                        prompt_impl, name="greet", version="1.0", tags={tag}
+                    )
+                ],
+            }
+
+        first = _PlainProvider(**components("a"))
+        second = _RefusingProvider(**components("b"))
+        mcp = FastMCP(providers=[first, second])
+        mcp.disable(tags={"a"})
+
+        # Every refused duplicate remains listed: listing is not authority.
+        assert [t.version for t in await mcp.list_tools()] == ["1.0"]
+        assert [str(r.uri) for r in await mcp.list_resources()] == ["data://cfg"]
+        assert [t.uri_template for t in await mcp.list_resource_templates()] == [
+            "data://items/{id}"
+        ]
+        assert [p.name for p in await mcp.list_prompts()] == ["greet"]
+
+        assert await mcp.get_tool("calc") is None
+        assert await mcp.get_resource("data://cfg") is None
+        assert await mcp.get_resource_template("data://items/{id}") is None
+        assert await mcp.get_prompt("greet") is None
+
+        with pytest.raises(NotFoundError):
+            await mcp.call_tool("calc", {})
+        with pytest.raises(NotFoundError):
+            await mcp.read_resource("data://cfg")
+        with pytest.raises(NotFoundError):
+            await mcp.render_prompt("greet", {})
